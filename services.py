@@ -30,7 +30,7 @@ def parse_iso_to_br(iso_date: str) -> datetime:
     except Exception as e:
         raise ValueError(f"Formato de data inválido: {iso_date}. Esperado ISO 8601.")
 
-def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_input: dict, max_retries: int) -> dict:
+def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_input: dict, max_retries: int, worker_func=None) -> dict:
     """
     Executa a lógica de uma etapa específica seguindo a convenção MindFlow.
     Step Name: {workflow_name}_{oqf}
@@ -43,14 +43,24 @@ def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_in
         br_started_at = get_br_now().isoformat()
         
         try:
-            # Simulação de processamento mínimo (Nó)
-            time.sleep(0.5)
-            output = {
-                "status": "ok", 
-                "step": step_full_name, 
-                "processed_at_utc": started_at,
-                "internal_br_log": br_started_at
-            }
+            if worker_func:
+                # Executa a lógica real se fornecida
+                logic_output = worker_func(step_input)
+                output = {
+                    "status": "ok",
+                    "data": logic_output,
+                    "processed_at_utc": started_at,
+                    "internal_br_log": br_started_at
+                }
+            else:
+                # Fallback para simulação caso não haja função lógica
+                time.sleep(0.5)
+                output = {
+                    "status": "ok", 
+                    "step": step_full_name, 
+                    "processed_at_utc": started_at,
+                    "internal_br_log": br_started_at
+                }
             
             # Registro de Detalhe (Sucesso)
             supabase.table('workflow_step_executions').insert({
@@ -135,15 +145,39 @@ def continue_workflow_execution(execution_id: str, payload: dict):
         # Atualiza status para RUNNING caso tenha vindo do agendador
         supabase.table('workflow_executions').update({'status': 'RUNNING'}).eq('id', execution_id).execute()
 
-        # Step 2: Buscar Prompt no Supabase
-        prompt_id = payload.get("Prompt_id") or payload.get("prompt_id")
-        if not prompt_id:
+        # Step 2: Buscar Prompt no Supabase (Lógica Real)
+        prompt_id_raw = payload.get("Prompt_id") or payload.get("prompt_id")
+        if not prompt_id_raw:
             raise ValueError("Prompt_id não encontrado para busca.")
 
-        prompt_data = run_step_with_retry(execution_id, workflow_name, 'fetch_prompt', {"prompt_id": prompt_id}, 3)
+        def fetch_prompt_logic(input_data):
+            p_id = input_data.get('prompt_id')
+            try:
+                # Tenta buscar por ID numérico
+                id_int = int(p_id)
+                res = supabase.table('Prompts').select('*').eq('id', id_int).execute()
+            except (ValueError, TypeError):
+                # Busca por Nome (Pormpt_Name com erro de digitação da tabela)
+                res = supabase.table('Prompts').select('*').eq('Pormpt_Name', p_id).execute()
+            
+            if not res.data:
+                raise ValueError(f"Prompt '{p_id}' não encontrado na tabela Prompts.")
+            
+            # Prioriza Ligação/txt pois o workflow é pre_call
+            return res.data[0].get('Ligação/txt') or res.data[0].get('Prompt_Text')
+
+        prompt_node_res = run_step_with_retry(
+            execution_id, 
+            workflow_name, 
+            'fetch_prompt', 
+            {"prompt_id": prompt_id_raw}, 
+            3,
+            worker_func=fetch_prompt_logic
+        )
+        prompt_content = prompt_node_res['data']
 
         # Step 3: Formatação (Nó de transformação)
-        formatted_data = run_step_with_retry(execution_id, workflow_name, 'format_payload', {"raw_prompt": prompt_data}, 1)
+        formatted_data = run_step_with_retry(execution_id, workflow_name, 'format_payload', {"raw_prompt": prompt_content}, 1)
 
         # Finaliza Mestre
         supabase.table('workflow_executions').update({

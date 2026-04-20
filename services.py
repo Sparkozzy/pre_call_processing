@@ -37,7 +37,7 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'__(.*?)__', r'\1', text)
     text = re.sub(r'\*(.*?)\*', r'\1', text)
-    text = re.sub(r'_(.*?)_', r'\1', text)
+    # text = re.sub(r'_(.*?)_', r'\1', text)  <-- Removido para evitar quebra de variáveis/termos técnicos
     # Headers
     text = re.sub(r'#+\s*(.*)', r'\1', text)
     # Bullets
@@ -199,11 +199,11 @@ def continue_workflow_execution(execution_id: str, payload: dict):
             raw_prompt = input_data.get('raw_prompt', '')
             payload_ref = input_data.get('payload_ref', {})
             
-            # Limpeza inicial
-            clean_text = raw_prompt.replace('\r', '') # Remove carriage returns
-            clean_text = strip_markdown(clean_text)
+            # 1. Limpeza inicial (Remover caracteres de controle)
+            clean_text = raw_prompt.replace('\r', '')
             
-            # Substituição de Variáveis de Contexto (Suporta {{var}} e {var})
+            # 2. Substituição de Variáveis de Contexto (Suporta {{var}} e {var})
+            # Realizado ANTES do strip_markdown para preservar underscores em nomes de variáveis
             mapping = {
                 "customer_name": payload_ref.get("nome") or payload_ref.get("customer_name") or "Lead",
                 "empresa": payload_ref.get("empresa") or "Empresa",
@@ -219,9 +219,12 @@ def continue_workflow_execution(execution_id: str, payload: dict):
                 # Double braces
                 clean_text = clean_text.replace("{{" + key + "}}", s_val)
                 clean_text = clean_text.replace("{{ " + key + " }}", s_val)
-                # Single braces (Fallback para prompt 24)
+                # Single braces (Fallback para prompt 24 e outros)
                 clean_text = clean_text.replace("{" + key + "}", s_val)
                 clean_text = clean_text.replace("{ " + key + " }", s_val)
+            
+            # 3. Limpeza de Markdown (Agora sobre o texto já preenchido)
+            clean_text = strip_markdown(clean_text)
             
             return {
                 "agent_prompt": clean_text,

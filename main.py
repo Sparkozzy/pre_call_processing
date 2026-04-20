@@ -23,6 +23,8 @@ class WebhookPayload(BaseModel):
     agent_id: str
     Prompt_id: Optional[str] = None
     quando_ligar: Optional[str] = None # ISO 8601 string
+    empresa: Optional[str] = None
+    segmento: Optional[str] = None
 
 @app.post("/webhook", status_code=status.HTTP_202_ACCEPTED)
 async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):

@@ -199,29 +199,34 @@ def continue_workflow_execution(execution_id: str, payload: dict):
             raw_prompt = input_data.get('raw_prompt', '')
             payload_ref = input_data.get('payload_ref', {})
             
-            # Limpeza de Markdown
-            clean_text = strip_markdown(raw_prompt)
+            # Limpeza inicial
+            clean_text = raw_prompt.replace('\r', '') # Remove carriage returns
+            clean_text = strip_markdown(clean_text)
             
-            # Substituição de Variáveis de Contexto ({{ var }})
+            # Substituição de Variáveis de Contexto (Suporta {{var}} e {var})
             mapping = {
-                "customer_name": payload_ref.get("nome", "Lead"),
-                "empresa": payload_ref.get("empresa", "Empresa"),
-                "segmento": payload_ref.get("segmento", "Segmento"),
+                "customer_name": payload_ref.get("nome") or payload_ref.get("customer_name") or "Lead",
+                "empresa": payload_ref.get("empresa") or "Empresa",
+                "segmento": payload_ref.get("segmento") or "Segmento",
                 "email": payload_ref.get("email", ""),
-                "numero_do_lead": payload_ref.get("numero", ""),
+                "numero_do_lead": payload_ref.get("numero") or payload_ref.get("numero_do_lead", ""),
                 "now": get_br_now().strftime("%d/%m/%Y %H:%M"),
                 "data_atual_iso": get_utc_now()
             }
             
             for key, val in mapping.items():
-                clean_text = clean_text.replace("{{" + key + "}}", str(val))
-                # Fallback para chaves com espaços se houver
-                clean_text = clean_text.replace("{{ " + key + " }}", str(val))
+                s_val = str(val)
+                # Double braces
+                clean_text = clean_text.replace("{{" + key + "}}", s_val)
+                clean_text = clean_text.replace("{{ " + key + " }}", s_val)
+                # Single braces (Fallback para prompt 24)
+                clean_text = clean_text.replace("{" + key + "}", s_val)
+                clean_text = clean_text.replace("{ " + key + " }", s_val)
             
             return {
                 "agent_prompt": clean_text,
+                "applied_mapping": mapping,
                 "metadata": {
-                    "applied_variables": list(mapping.keys()),
                     "original_prompt_id": payload_ref.get("Prompt_id")
                 }
             }

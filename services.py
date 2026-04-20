@@ -1,4 +1,6 @@
 import time
+import requests
+import os
 from datetime import datetime, timezone
 import zoneinfo
 from database import supabase
@@ -242,12 +244,67 @@ def continue_workflow_execution(execution_id: str, payload: dict):
             1,
             worker_func=format_payload_logic
         )
-        final_payload = formatted_res['data']
+        final_data = formatted_res['data']
+
+        # Step 4: Criar Chamada na Retell AI (Passo Final)
+        def create_retell_call_logic(input_data):
+            p = input_data.get('payload_ref', {})
+            fd = input_data.get('final_data', {})
+            
+            api_key = os.getenv("RETELL_API_KEY")
+            if not api_key:
+                raise ValueError("RETELL_API_KEY não configurada no ambiente.")
+            
+            url = "https://api.retellai.com/v2/create-phone-call"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Montagem do Body conforme especificação do n8n
+            retell_payload = {
+                "from_number": os.getenv("RETELL_FROM_NUMBER", "iatizeia"),
+                "to_number": p.get("numero"),
+                "override_agent_id": p.get("agent_id"),
+                "metadata": {
+                    "workflow_execution_id": execution_id,
+                    "workflow_name": workflow_name
+                },
+                "retell_llm_dynamic_variables": {
+                    "customer_name": p.get("nome"),
+                    "prompt": fd.get("agent_prompt"),
+                    "now": get_utc_now(), # ISO UTC para Retell
+                    "contexto": f"Empresa: {p.get('empresa')}\nSegmento: {p.get('segmento')}",
+                    "numero_do_lead": p.get("numero"),
+                    "empresa": p.get("empresa"),
+                    "email": p.get("email")
+                }
+            }
+            
+            response = requests.post(url, json=retell_payload, headers=headers, timeout=15)
+            
+            if response.status_code not in [200, 201]:
+                raise Exception(f"Erro Retell AI ({response.status_code}): {response.text}")
+                
+            return response.json()
+
+        retell_res = run_step_with_retry(
+            execution_id, 
+            workflow_name, 
+            'create_retell_call', 
+            {"payload_ref": payload, "final_data": final_data}, 
+            3, # Até 3 tentativas se a API oscilar
+            worker_func=create_retell_call_logic
+        )
 
         # Finaliza Mestre
         supabase.table('workflow_executions').update({
             'status': 'SUCCESS',
-            'output_data': {"status": "Workflow finalizado com sucesso", "execution_type": "Scheduled/Immediate"},
+            'output_data': {
+                "status": "Workflow finalizado com sucesso", 
+                "execution_type": "Scheduled/Immediate",
+                "call_id": retell_res['data'].get('call_id')
+            },
             'completed_at': get_utc_now()
         }).eq('id', execution_id).execute()
         

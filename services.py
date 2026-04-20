@@ -48,6 +48,7 @@ def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_in
                 logic_output = worker_func(step_input)
                 output = {
                     "status": "ok",
+                    "version": "v2-real-logic",
                     "data": logic_output,
                     "processed_at_utc": started_at,
                     "internal_br_log": br_started_at
@@ -56,7 +57,8 @@ def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_in
                 # Fallback para simulação caso não haja função lógica
                 time.sleep(0.5)
                 output = {
-                    "status": "ok", 
+                    "status": "ok",
+                    "version": "v2-real-logic",
                     "step": step_full_name, 
                     "processed_at_utc": started_at,
                     "internal_br_log": br_started_at

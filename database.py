@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import create_client, create_async_client, Client, AsyncClient
 
 # Carrega as variáveis do arquivo .env
 load_dotenv()
@@ -14,6 +14,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print(f"LOG: Cliente Supabase configurado (URL: {SUPABASE_URL})")
+    supabase_async: AsyncClient = create_async_client(SUPABASE_URL, SUPABASE_KEY)
+    print(f"LOG: Clientes Supabase (Sync e Async) configurados (URL: {SUPABASE_URL})")
 except Exception as e:
     print(f"LOG ERROR: Erro ao configurar Supabase: {e}")

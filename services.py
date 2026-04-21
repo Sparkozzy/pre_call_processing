@@ -1,20 +1,14 @@
-import time
-import requests
+import asyncio
+import httpx
 import os
+import random
 from datetime import datetime, timezone
 import zoneinfo
-from database import supabase
-from apscheduler.schedulers.background import BackgroundScheduler
-import pytz
+from database import supabase_async
 
-# Configuração de Fusos Horários e Agendador
+# Configuração de Fusos Horários
 UTC = timezone.utc
 BR_TIMEZONE = zoneinfo.ZoneInfo("America/Sao_Paulo")
-PYTZ_BR = pytz.timezone("America/Sao_Paulo")
-
-# Inicializa o Agendador em Background (RAM)
-scheduler = BackgroundScheduler(timezone=PYTZ_BR)
-scheduler.start()
 
 def get_utc_now():
     """Retorna o horário atual em UTC para persistência em banco de dados."""
@@ -39,7 +33,6 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'__(.*?)__', r'\1', text)
     text = re.sub(r'\*(.*?)\*', r'\1', text)
-    # text = re.sub(r'_(.*?)_', r'\1', text)  <-- Removido para evitar quebra de variáveis/termos técnicos
     # Headers
     text = re.sub(r'#+\s*(.*)', r'\1', text)
     # Bullets
@@ -48,9 +41,9 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
     return text.strip()
 
-def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_input: dict, max_retries: int, worker_func=None) -> dict:
+async def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_input: dict, max_retries: int, worker_func=None) -> dict:
     """
-    Executa a lógica de uma etapa específica seguindo a convenção MindFlow.
+    Executa a lógica de uma etapa específica de forma assíncrona com exponential backoff.
     Step Name: {workflow_name}_{oqf}
     """
     step_full_name = f"{workflow_name}_{oqf}"
@@ -62,28 +55,26 @@ def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_in
         
         try:
             if worker_func:
-                # Executa a lógica real se fornecida
-                logic_output = worker_func(step_input)
+                logic_output = await worker_func(step_input)
                 output = {
                     "status": "ok",
-                    "version": "v2-real-logic",
+                    "version": "v3-async-arq",
                     "data": logic_output,
                     "processed_at_utc": started_at,
                     "internal_br_log": br_started_at
                 }
             else:
-                # Fallback para simulação caso não haja função lógica
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
                 output = {
                     "status": "ok",
-                    "version": "v2-real-logic",
+                    "version": "v3-async-arq",
                     "step": step_full_name, 
                     "processed_at_utc": started_at,
                     "internal_br_log": br_started_at
                 }
             
-            # Registro de Detalhe (Sucesso)
-            supabase.table('workflow_step_executions').insert({
+            # Registro de Detalhe (Sucesso) via client async
+            await supabase_async.table('workflow_step_executions').insert({
                 'execution_id': execution_id,
                 'step_name': step_full_name,
                 'status': 'SUCCESS',
@@ -95,9 +86,10 @@ def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_in
             }).execute()
             
             return output
+            
         except Exception as error:
-            # Registro de Detalhe (Falha imutável)
-            supabase.table('workflow_step_executions').insert({
+            # Registro de Detalhe (Falha imutável) via client async
+            await supabase_async.table('workflow_step_executions').insert({
                 'execution_id': execution_id,
                 'step_name': step_full_name,
                 'status': 'FAILED',
@@ -111,21 +103,23 @@ def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, step_in
             if attempt == max_retries: 
                 raise Exception(f"Etapa {step_full_name} falhou após {max_retries} tentativas: {str(error)}")
             
+            # Exponential Backoff com Jitter para evitar thundering herd
+            delay = min(2 ** attempt + random.uniform(0, 1), 30)
+            await asyncio.sleep(delay)
             attempt += 1
-            time.sleep(1)
 
-def schedule_execution_node(execution_id: str, payload: dict):
+async def schedule_execution_node(ctx, execution_id: str, payload: dict):
     """
-    Nó de Agendamento (EDW):
-    Decide se o workflow continua agora ou se é agendado no APScheduler.
-    Regista a ação em workflow_step_executions.
+    Nó de Agendamento Assíncrono (Redis/ARQ):
+    - Se a data for passada ou ausente, continua imediatamente.
+    - Se for futura, usa o Redis (ARQ _defer_until) para agendar de forma persistente.
     """
     workflow_name = payload.get('workflow_name', 'envia_ligacao')
     quando_ligar_raw = payload.get('quando_ligar')
     
     if not quando_ligar_raw:
-        # Se não houver data, assume execução imediata
-        continue_workflow_execution(execution_id, payload)
+        # Execução imediata
+        await continue_workflow_execution(ctx, execution_id, payload)
         return
 
     # 1. Comparação de datas
@@ -135,58 +129,55 @@ def schedule_execution_node(execution_id: str, payload: dict):
     step_input = {"quando_ligar_original": quando_ligar_raw, "agora_br": agora.isoformat()}
     
     if data_agendada <= agora:
-        # 2a. Execução Imediata
+        # Execução Imediata
         output = {"decisao": "EXECUCAO_IMEDIATA", "motivo": "Data no passado ou agora"}
-        run_step_with_retry(execution_id, workflow_name, 'agendamento_ram', step_input, 1) # Registra o nó
-        continue_workflow_execution(execution_id, payload)
+        await run_step_with_retry(execution_id, workflow_name, 'agendamento_redis', step_input, 1)
+        await continue_workflow_execution(ctx, execution_id, payload)
     else:
-        # 2b. Agendamento em RAM (APScheduler)
-        output = {"decisao": "AGENDADO_RAM", "agendado_para": data_agendada.isoformat()}
+        # Agendamento persistente via Redis/ARQ
+        output = {"decisao": "AGENDADO_REDIS", "agendado_para": data_agendada.isoformat()}
         
-        # Agenda a execução futura em RAM
-        scheduler.add_job(
-            continue_workflow_execution,
-            'date',
-            run_date=data_agendada,
-            args=[execution_id, payload]
+        # Enfileira o job com atraso (deferred) para o Redis processar com segurança
+        await ctx['redis'].enqueue_job(
+            'continue_workflow_execution',
+            execution_id,
+            payload,
+            _defer_until=data_agendada
         )
         
-        # Garante a rastreabilidade do agendamento (Nó concluído)
-        run_step_with_retry(execution_id, workflow_name, 'agendamento_ram', {**step_input, **output}, 1)
+        # Garante a rastreabilidade (Nó concluído)
+        await run_step_with_retry(execution_id, workflow_name, 'agendamento_redis', {**step_input, **output}, 1)
 
-def continue_workflow_execution(execution_id: str, payload: dict):
+async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
     """
-    Continuação do Workflow:
-    Executada no momento exato (seja agora ou via scheduler).
+    Continuação do Workflow (executada de forma assíncrona pelo Worker ARQ):
+    Realizado agora ou deferido via Redis.
     """
     workflow_name = payload.get('workflow_name', 'envia_ligacao')
     
     try:
-        # Atualiza status para RUNNING caso tenha vindo do agendador
-        supabase.table('workflow_executions').update({'status': 'RUNNING'}).eq('id', execution_id).execute()
+        # Atualiza status para RUNNING 
+        await supabase_async.table('workflow_executions').update({'status': 'RUNNING'}).eq('id', execution_id).execute()
 
-        # Step 2: Buscar Prompt no Supabase (Lógica Real)
+        # Step 2: Buscar Prompt no Supabase
         prompt_id_raw = payload.get("Prompt_id") or payload.get("prompt_id")
         if not prompt_id_raw:
             raise ValueError("Prompt_id não encontrado para busca.")
 
-        def fetch_prompt_logic(input_data):
+        async def fetch_prompt_logic(input_data):
             p_id = input_data.get('prompt_id')
             try:
-                # Tenta buscar por ID numérico
                 id_int = int(p_id)
-                res = supabase.table('Prompts').select('*').eq('id', id_int).execute()
+                res = await supabase_async.table('Prompts').select('*').eq('id', id_int).execute()
             except (ValueError, TypeError):
-                # Busca por Nome (Pormpt_Name com erro de digitação da tabela)
-                res = supabase.table('Prompts').select('*').eq('Pormpt_Name', p_id).execute()
+                res = await supabase_async.table('Prompts').select('*').eq('Pormpt_Name', p_id).execute()
             
             if not res.data:
                 raise ValueError(f"Prompt '{p_id}' não encontrado na tabela Prompts.")
             
-            # Prioriza Ligação/txt pois o workflow é pre_call
             return res.data[0].get('Ligação/txt') or res.data[0].get('Prompt_Text')
 
-        prompt_node_res = run_step_with_retry(
+        prompt_node_res = await run_step_with_retry(
             execution_id, 
             workflow_name, 
             'fetch_prompt', 
@@ -196,16 +187,13 @@ def continue_workflow_execution(execution_id: str, payload: dict):
         )
         prompt_content = prompt_node_res['data']
 
-        # Step 3: Formatação (Nó de transformação)
-        def format_payload_logic(input_data):
+        # Step 3: Formatação Automática (Async mas sem I/O pesado, usamos a lógica adaptada)
+        async def format_payload_logic(input_data):
             raw_prompt = input_data.get('raw_prompt', '')
             payload_ref = input_data.get('payload_ref', {})
             
-            # 1. Limpeza inicial (Remover caracteres de controle)
             clean_text = raw_prompt.replace('\r', '')
             
-            # 2. Substituição de Variáveis de Contexto (Suporta {{var}} e {var})
-            # Realizado ANTES do strip_markdown para preservar underscores em nomes de variáveis
             mapping = {
                 "customer_name": payload_ref.get("nome") or payload_ref.get("customer_name") or "Lead",
                 "empresa": payload_ref.get("empresa") or "Empresa",
@@ -218,14 +206,11 @@ def continue_workflow_execution(execution_id: str, payload: dict):
             
             for key, val in mapping.items():
                 s_val = str(val)
-                # Double braces
                 clean_text = clean_text.replace("{{" + key + "}}", s_val)
                 clean_text = clean_text.replace("{{ " + key + " }}", s_val)
-                # Single braces (Fallback para prompt 24 e outros)
                 clean_text = clean_text.replace("{" + key + "}", s_val)
                 clean_text = clean_text.replace("{ " + key + " }", s_val)
             
-            # 3. Limpeza de Markdown (Agora sobre o texto já preenchido)
             clean_text = strip_markdown(clean_text)
             
             return {
@@ -236,7 +221,7 @@ def continue_workflow_execution(execution_id: str, payload: dict):
                 }
             }
 
-        formatted_res = run_step_with_retry(
+        formatted_res = await run_step_with_retry(
             execution_id, 
             workflow_name, 
             'format_payload', 
@@ -246,8 +231,8 @@ def continue_workflow_execution(execution_id: str, payload: dict):
         )
         final_data = formatted_res['data']
 
-        # Step 4: Criar Chamada na Retell AI (Passo Final)
-        def create_retell_call_logic(input_data):
+        # Step 4: Criar Chamada na Retell AI (Substituindo request síncrono por httpx assíncrono)
+        async def create_retell_call_logic(input_data):
             p = input_data.get('payload_ref', {})
             fd = input_data.get('final_data', {})
             
@@ -261,7 +246,6 @@ def continue_workflow_execution(execution_id: str, payload: dict):
                 "Content-Type": "application/json"
             }
             
-            # Montagem do Body conforme especificação do n8n
             retell_payload = {
                 "from_number": os.getenv("RETELL_FROM_NUMBER", "iatizeia"),
                 "to_number": p.get("numero"),
@@ -281,37 +265,38 @@ def continue_workflow_execution(execution_id: str, payload: dict):
                 }
             }
             
-            response = requests.post(url, json=retell_payload, headers=headers, timeout=15)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=retell_payload, headers=headers, timeout=15.0)
             
             if response.status_code not in [200, 201]:
                 raise Exception(f"Erro Retell AI ({response.status_code}): {response.text}")
                 
             return response.json()
 
-        retell_res = run_step_with_retry(
+        retell_res = await run_step_with_retry(
             execution_id, 
             workflow_name, 
             'create_retell_call', 
             {"payload_ref": payload, "final_data": final_data}, 
-            3, # Até 3 tentativas se a API oscilar
+            3, # Até 3 tentativas com exponential backoff
             worker_func=create_retell_call_logic
         )
 
         # Finaliza Mestre
-        supabase.table('workflow_executions').update({
+        await supabase_async.table('workflow_executions').update({
             'status': 'SUCCESS',
             'output_data': {
                 "status": "Workflow finalizado com sucesso", 
-                "execution_type": "Scheduled/Immediate",
+                "execution_type": "Scheduled/Immediate (Redis/ARQ)",
                 "call_id": retell_res['data'].get('call_id')
             },
             'completed_at': get_utc_now()
         }).eq('id', execution_id).execute()
         
-        print(f"Workflow {workflow_name} ({execution_id}) processado pós-agendamento.")
+        print(f"Workflow {workflow_name} ({execution_id}) processado com sucesso no worker ARQ.")
 
     except Exception as e:
-        supabase.table('workflow_executions').update({
+        await supabase_async.table('workflow_executions').update({
             'status': 'FAILED',
             'error_details': str(e),
             'completed_at': get_utc_now()

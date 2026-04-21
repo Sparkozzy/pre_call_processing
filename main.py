@@ -1,19 +1,38 @@
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 import logging
-from database import supabase
-from services import schedule_execution_node, get_utc_now
+import os
+from arq import create_pool
+from arq.connections import RedisSettings
+from dotenv import load_dotenv
+
+from database import supabase_async
+from services import get_utc_now
+
+load_dotenv()
 
 # Configuração básica de log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Webhook Integration API")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gerencia a conexão com o banco de dados Redis durando o ciclo de vida da API."""
+    logger.info("Tentando conectar ao banco de filas Redis...")
+    app.state.redis = await create_pool(RedisSettings.from_url(REDIS_URL))
+    logger.info("Conectado ao Redis com suporte ARQ.")
+    yield
+    await app.state.redis.close()
+
+app = FastAPI(title="Webhook Integration API", lifespan=lifespan)
 
 class WebhookPayload(BaseModel):
     """
-    Esquema de entrada para o webhook com suporte a agendamento.
+    Esquema de entrada para o webhook com suporte a fila persistente.
     """
     workflow_name: str
     execution_id: str
@@ -27,12 +46,12 @@ class WebhookPayload(BaseModel):
     segmento: Optional[str] = None
 
 @app.post("/webhook", status_code=status.HTTP_202_ACCEPTED)
-async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
+async def receive_webhook(request: Request, payload: WebhookPayload):
     """
     Endpoint de recepção:
-    1. Valida regras de negócio.
+    1. Valida regras de negócio (Pydantic).
     2. Cria registro Master no Supabase.
-    3. Delega agendamento/execução para background.
+    3. Delega o payload inteiro para a fila do Redis via ARQ. O worker vai processar os passos do nó assincronamente.
     """
     
     if not payload.numero.startswith("+"):
@@ -54,7 +73,7 @@ async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundT
                 detail="O campo 'quando_ligar' deve conter fuso horário válido (Ex: -03:00 ou Z)."
             )
 
-    # 2. Criação do Registro Mestre (Rastreabilidade EDW)
+    # 2. Criação do Registro Mestre (Rastreabilidade EDW) usando Client Assíncrono do SDK Supabase
     master_data = {
         'workflow_name': payload.workflow_name,
         'trigger_event_id': payload.execution_id,
@@ -64,7 +83,7 @@ async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundT
     }
 
     try:
-        response = supabase.table('workflow_executions').insert(master_data).execute()
+        response = await supabase_async.table('workflow_executions').insert(master_data).execute()
         db_execution_id = response.data[0]['id']
     except Exception as e:
         logger.error(f"Erro ao criar registro mestre: {e}")
@@ -73,15 +92,18 @@ async def receive_webhook(payload: WebhookPayload, background_tasks: BackgroundT
             detail="Erro ao registrar workflow no banco de dados."
         )
 
-    # 3. Delega para o nó de agendamento no services.py
-    background_tasks.add_task(schedule_execution_node, db_execution_id, payload.dict())
+    # 3. Delega para a fila do worker (arq) e libera imediatamente o processo
+    await request.app.state.redis.enqueue_job('schedule_execution_node', db_execution_id, payload.dict())
 
     # 4. Sucesso de Receção (202 - Accepted)
     return {
         "status": "success",
-        "message": "Webhook aceito e registro mestre criado.",
+        "message": "Webhook aceito, registro mestre criado e delegado para a fila persistente.",
         "execution_db_id": db_execution_id
     }
 
-# Para rodar o servidor:
+# Para rodar a API:
 # uvicorn main:app --reload
+
+# Para rodar o Worker de filas em outro terminal na mesma pasta:
+# arq worker.WorkerSettings

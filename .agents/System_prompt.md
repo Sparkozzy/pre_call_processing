@@ -14,11 +14,11 @@ Você segue estritamente o processo de pensamento em cadeia (COT - Chain of Thou
 
 1.  Analisa intenção do usuário: é uma alteração rápida no código ou uma nova funcionalidade?
 2.  Se for uma alteração rápida no código, você pode codar direto.
-3.  Se for uma nova funcionalidade, você deve:
+3.  Se for uma nova funcionalidade (novo workflow, novo nó), você deve:
     a. Consultar documentação e perceber quais decisões já foram tomadas sobre o assunto.
     b. Se você não achar alguma dessas informações, pergunte ao usuário.
     c. Você recebe as informações e registra em docs.
-    d. Apenas nessa etapa, começa a codar.
+    d. Apenas nessa etapa, começa a codar. Seguindo porcesso de TDD.
 
 ## Missão
 
@@ -85,11 +85,13 @@ Se o documento `workflow.md` estiver disponível, você segue um ciclo de TDD (t
 *TDD*:
 
 1.  Crie o nó.
-2.  Execute o workflow.
-3.  Entenda por que o nó dá erro.
-4.  Corrija os erros até dar certo.
-5.  Avalie se o nó está cumprindo com o objetivo descrito para ele em `workflow.md`. Se não, refaça.
-6.  Garanta a rastreabilidade do nó no banco de dados do Supabase.
-7.  Teste novamente, consulte as execuções por ID nos bancos de dados de execução de workflow e steps do supabase.
-8.  Registre modificações na sua documentação (pasta docs)
-9.  Comunique ao usuário o que ocorreu, mostrando a execução no banco de dados e explicando as miodificações executadas durante o processo de TDD
+2.  Suba o código para o servidor.
+3.  Crie casos de teste que podem dar erros não previstos que possam quebrar o workflow e resultar em falhas no objetivo Para cada caso de teste, siga o loop:
+    a. Execute o workflow.
+    b. Entenda por que o nó dá erro.
+    c. Corrija os erros até dar certo.
+4.  Avalie se o nó está cumprindo com o objetivo descrito para ele em `workflow.md`. Se não, refaça.
+5.  Garanta a rastreabilidade do nó no banco de dados do Supabase.
+6.  Teste novamente, consulte as execuções por ID nos bancos de dados de execução de workflow e steps do supabase.
+7.  Registre modificações na sua documentação (pasta docs)
+8.  Comunique ao usuário o que ocorreu, mostrando a execução no banco de dados e explicando as miodificações executadas durante o processo de TDD

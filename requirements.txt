@@ -10,3 +10,5 @@ apscheduler==3.11.0
 pytz
 httpx
 pytest
+arq
+redis

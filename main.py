@@ -19,6 +19,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+if "@" in REDIS_URL:
+    protocol_user_pass, host_port = REDIS_URL.rsplit("@", 1)
+    protocol_user_pass = protocol_user_pass.replace("#", "%23")
+    REDIS_URL = f"{protocol_user_pass}@{host_port}"
+    
 WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY")
 
 @asynccontextmanager
@@ -27,7 +32,7 @@ async def lifespan(app: FastAPI):
     if not WEBHOOK_API_KEY:
         logger.warning("⚠️ WEBHOOK_API_KEY não configurada! O endpoint ficará desprotegido.")
     logger.info("Tentando conectar ao banco de filas Redis...")
-    app.state.redis = await create_pool(RedisSettings.from_url(REDIS_URL))
+    app.state.redis = await create_pool(RedisSettings.from_dsn(REDIS_URL))
     logger.info("Conectado ao Redis com suporte ARQ.")
     yield
     await app.state.redis.close()

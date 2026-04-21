@@ -24,25 +24,26 @@ Ao acionar ou transitar entre fluxos, os seguintes metadados de rastreabilidade 
 - Um **Nó** é a **mínima ação rastreável** dentro de um workflow.
 - **Regra de Ouro**: Nunca mescle ações distintas. Busca de dados, transformação e envio externo devem ser nós separados.
 - Exemplo de sequência atual (workflow `pre_call_processing`):
-  1. `agendamento_ram` — Decisão de timing (imediato vs futuro).
-  2. `fetch_prompt` — Busca dados no Supabase.
+  1. `agendamento_redis` — Decisão de timing (imediato vs futuro via Redis `_defer_until`).
+  2. `fetch_prompt` — Busca dados no Supabase (async).
   3. `format_payload` — Transformação de dados e substituição de variáveis.
-  4. `create_retell_call` — Envio para API externa (Retell AI).
+  4. `create_retell_call` — Envio assíncrono (httpx) para API externa (Retell AI).
 
 ### Executor Genérico (`run_step_with_retry`)
 
 Todos os nós devem ser executados via `run_step_with_retry()`. Esta função garante:
 - Registro automático de cada tentativa em `workflow_step_executions` (sucesso e falha).
-- Retry configurável por nó (`max_retries`).
-- Recebe um `worker_func` opcional com a lógica real; sem ele, executa simulação (fallback).
+- Retry configurável por nó (`max_retries`) com **exponential backoff + jitter** (`2^attempt + random(0,1)`, cap 30s).
+- Recebe um `worker_func` opcional (async) com a lógica real; sem ele, executa simulação (fallback).
+- Todas as chamadas internas usam `await` (non-blocking).
 
 ## 🏗️ Stack Tecnológica
 
 - **Backend**: Sempre usar **Python**.
 - **Frameworks**: Usar **FastAPI** ou **FastMCP**.
-- **Proibido**: Nunca utilizar Flask ou frameworks que não suportem nativamente padrões modernos de assincronia e performance exigidos para EDW.
-- **HTTP Requests**: Usar `requests` para chamadas síncronas a APIs externas (ex: Retell AI).
-- **Agendamento**: Usar `APScheduler` (`BackgroundScheduler`) para execuções futuras.
+- **Proibido**: Nunca utilizar Flask, `requests` (bloqueante), `time.sleep()`, `BackgroundTasks` (FastAPI), ou `APScheduler`.
+- **HTTP Requests**: Usar `httpx.AsyncClient()` para chamadas assíncronas a APIs externas (ex: Retell AI).
+- **Filas e Agendamento**: Usar `arq` (Async Redis Queue) para processamento em background e agendamento de tarefas futuras.
 
 ## 📛 Convenção de Nomenclatura
 
@@ -76,15 +77,15 @@ Após a substituição de variáveis, o texto é limpo para compatibilidade com 
 - Remove blockquotes (`> texto`).
 - **Não** remove underscores simples (`_`) para preservar nomes de variáveis/termos técnicos.
 
-## ⏰ Agendamento e Resiliência (APScheduler)
+## ⏰ Agendamento e Resiliência (Redis + ARQ)
 
-Para fluxos que exigem execução futura, seguimos o padrão de **Agendamento em RAM**:
+Para fluxos que exigem execução futura, seguimos o padrão de **Agendamento Persistente via Redis**:
 
-1.  **Imediação**: Se a data agendada for passada ou atual, a execução segue para o próximo nó imediatamente.
-2.  **Futuro**: Se a data for futura, utilizamos o `APScheduler` (BackgroundScheduler) para programar a chamada da função de continuação do workflow na RAM.
-3.  **Rastreabilidade de Agendamento**: O ato de agendar é um **Nó (Step)**. Deve ser registrado em `workflow_step_executions` como `SUCCESS`, contendo no `output_data` a confirmação do horário agendado.
-4.  **Resposta do Webhook**: O webhook deve retornar `202 Accepted` imediatamente após criar o registro mestre e delegar para o nó de agendamento.
-5.  **Limitação**: Jobs agendados vivem apenas em RAM. Reiniciar o servidor perde jobs pendentes.
+1.  **Imediata**: Se a data agendada for passada ou atual, a execução segue para o próximo nó imediatamente.
+2.  **Futuro**: Se a data for futura, utilizamos o `arq` com `_defer_until` para agendar o job no Redis de forma **persistente**.
+3.  **Rastreabilidade de Agendamento**: O ato de agendar é um **Nó (Step)** (`agendamento_redis`). Deve ser registrado em `workflow_step_executions` como `SUCCESS`, contendo no `output_data` a confirmação do horário agendado.
+4.  **Resposta do Webhook**: O webhook deve retornar `202 Accepted` imediatamente após criar o registro mestre e enfileirar no Redis.
+5.  **Persistência**: Jobs agendados vivem no Redis. Restarts do servidor **não perdem** jobs pendentes (desde que o Redis esteja ativo).
 
 ## 📊 Estrutura de Monitoramento (Mestre-Detalhe)
 

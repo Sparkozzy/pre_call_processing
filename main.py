@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request, Header
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 import logging
 import os
+import hmac
 from arq import create_pool
 from arq.connections import RedisSettings
 from dotenv import load_dotenv
@@ -18,10 +19,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gerencia a conexão com o banco de dados Redis durando o ciclo de vida da API."""
+    if not WEBHOOK_API_KEY:
+        logger.warning("⚠️ WEBHOOK_API_KEY não configurada! O endpoint ficará desprotegido.")
     logger.info("Tentando conectar ao banco de filas Redis...")
     app.state.redis = await create_pool(RedisSettings.from_url(REDIS_URL))
     logger.info("Conectado ao Redis com suporte ARQ.")
@@ -46,13 +50,21 @@ class WebhookPayload(BaseModel):
     segmento: Optional[str] = None
 
 @app.post("/webhook", status_code=status.HTTP_202_ACCEPTED)
-async def receive_webhook(request: Request, payload: WebhookPayload):
+async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: str = Header(alias="X-API-Key")):
     """
     Endpoint de recepção:
-    1. Valida regras de negócio (Pydantic).
-    2. Cria registro Master no Supabase.
-    3. Delega o payload inteiro para a fila do Redis via ARQ. O worker vai processar os passos do nó assincronamente.
+    1. Autentica via X-API-Key header.
+    2. Valida regras de negócio (Pydantic).
+    3. Cria registro Master no Supabase.
+    4. Delega o payload inteiro para a fila do Redis via ARQ. O worker vai processar os passos do nó assincronamente.
     """
+    
+    # 0. Autenticação via API Key
+    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key inválida ou ausente. Verifique o header 'X-API-Key'."
+        )
     
     if not payload.numero.startswith("+"):
         raise HTTPException(

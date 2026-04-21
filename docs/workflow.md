@@ -7,11 +7,11 @@ Este workflow é responsável por receber uma solicitação de chamada via webho
 
 | Ordem | Step Name | O Que Faz |
 | :--- | :--- | :--- |
-| 1 | `pre_call_processing_webhook` | Ponto de entrada (main.py). Cria o Registro Mestre e faz validações básicas. |
-| 2 | `pre_call_processing_agendamento_ram` | Verifica a data `quando_ligar`. Decide entre execução imediata ou agendamento via APScheduler. |
-| 3 | `pre_call_processing_fetch_prompt` | Consulta a tabela `Prompts` no Supabase utilizando o `prompt_id` recebido. |
+| 1 | `pre_call_processing_webhook` | Ponto de entrada (main.py). Cria o Registro Mestre, valida e enfileira no Redis via ARQ. |
+| 2 | `pre_call_processing_agendamento_redis` | Verifica a data `quando_ligar`. Decide entre execução imediata ou agendamento persistente via Redis `_defer_until`. |
+| 3 | `pre_call_processing_fetch_prompt` | Consulta a tabela `Prompts` no Supabase utilizando o `prompt_id` recebido (async). |
 | 4 | `pre_call_processing_format_payload` | Limpa o texto do prompt e monta o JSON final seguindo as regras de negócio. |
-| 5 | `pre_call_processing_create_retell_call` | Envia o payload formatado para a API da Retell AI para iniciar a chamada. |
+| 5 | `pre_call_processing_create_retell_call` | Envia o payload formatado via httpx async para a API da Retell AI para iniciar a chamada. |
 
 ## Rastreabilidade (Supabase)
 O fluxo deve registrar o início na tabela `workflow_executions` e cada passo em `workflow_step_executions`.
@@ -26,7 +26,7 @@ O fluxo deve registrar o início na tabela `workflow_executions` e cada passo em
   "nome": "Ryan",                                 // obrigatório (str)
   "email": "test@example.com",                    // obrigatório (EmailStr)
   "agent_id": "agent_1e4cfa23...",                // obrigatório (str) — Override Agent ID da Retell
-  "Prompt_id": "24",                              // obrigatório (str) — ID ou nome do prompt
+  "Prompt_id": "24",                              // obrigatório (str) — ID ou do prompt
   "quando_ligar": "2026-04-21T15:00:00-03:00",   // opcional (str) — ISO 8601 com timezone
   "empresa": "MindFlow Agency",                   // opcional (str)
   "segmento": "Inteligência Artificial"           // opcional (str)

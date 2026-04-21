@@ -9,7 +9,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from dotenv import load_dotenv
 
-from database import supabase_async
+from database import supabase
 from services import get_utc_now
 
 load_dotenv()
@@ -96,11 +96,11 @@ async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: 
         'trigger_event_id': payload.execution_id,
         'status': 'PENDING',
         'input_data': payload.dict(),
-        'started_at': get_utc_now().isoformat()
+        'started_at': get_utc_now()
     }
 
     try:
-        response = await supabase_async.table('workflow_executions').insert(master_data).execute()
+        response = supabase.table('workflow_executions').insert(master_data).execute()
         db_execution_id = response.data[0]['id']
     except Exception as e:
         logger.error(f"Erro ao criar registro mestre: {e}")

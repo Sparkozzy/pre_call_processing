@@ -96,7 +96,7 @@ async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: 
         'trigger_event_id': payload.execution_id,
         'status': 'PENDING',
         'input_data': payload.dict(),
-        'started_at': get_utc_now()
+        'started_at': get_utc_now().isoformat()
     }
 
     try:

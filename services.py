@@ -4,7 +4,7 @@ import os
 import random
 from datetime import datetime, timezone
 import zoneinfo
-from database import supabase_async
+from database import get_supabase_async
 
 # Configuração de Fusos Horários
 UTC = timezone.utc
@@ -47,6 +47,7 @@ async def run_step_with_retry(execution_id: str, workflow_name: str, oqf: str, s
     Step Name: {workflow_name}_{oqf}
     """
     step_full_name = f"{workflow_name}_{oqf}"
+    supabase_async = await get_supabase_async()
     attempt = 1
     
     while attempt <= max_retries:
@@ -154,6 +155,7 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
     Realizado agora ou deferido via Redis.
     """
     workflow_name = payload.get('workflow_name', 'envia_ligacao')
+    supabase_async = await get_supabase_async()
     
     try:
         # Atualiza status para RUNNING 

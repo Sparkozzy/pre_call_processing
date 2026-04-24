@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status, Request, Header
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 import logging
 import os
@@ -53,6 +53,22 @@ class WebhookPayload(BaseModel):
     quando_ligar: Optional[str] = None # ISO 8601 string
     empresa: Optional[str] = None
     segmento: Optional[str] = None
+
+    @field_validator('email', mode='before')
+    @classmethod
+    def clean_email(cls, v):
+        if isinstance(v, str):
+            # Limpa espaços e pontuação indevida no fim do e-mail
+            return v.strip().rstrip('. ,;')
+        return v
+
+    @field_validator('nome', mode='before')
+    @classmethod
+    def clean_nome(cls, v):
+        if isinstance(v, str):
+            # Higieniza caracteres extras deixados nos nomes frequentemente (pontos na extração)
+            return v.strip(' .-_,;')
+        return v
 
 @app.post("/webhook", status_code=status.HTTP_202_ACCEPTED)
 async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: str = Header(alias="X-API-Key")):

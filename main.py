@@ -48,7 +48,7 @@ class WebhookPayload(BaseModel):
     numero: str
     nome: str
     email: EmailStr
-    agent_id: str
+    agent_id: Optional[str] = None
     Prompt_id: Optional[str] = None
     quando_ligar: Optional[str] = None # ISO 8601 string
     empresa: Optional[str] = None

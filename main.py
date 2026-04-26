@@ -53,6 +53,7 @@ class WebhookPayload(BaseModel):
     quando_ligar: Optional[str] = None # ISO 8601 string
     empresa: Optional[str] = None
     segmento: Optional[str] = None
+    contexto: Optional[str] = None
 
     @field_validator('email', mode='before')
     @classmethod

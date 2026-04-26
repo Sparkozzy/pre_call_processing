@@ -29,7 +29,8 @@ O fluxo deve registrar o início na tabela `workflow_executions` e cada passo em
   "Prompt_id": "24",                              // obrigatório (str) — ID ou do prompt
   "quando_ligar": "2026-04-21T15:00:00-03:00",   // opcional (str) — ISO 8601 com timezone
   "empresa": "MindFlow Agency",                   // opcional (str)
-  "segmento": "Inteligência Artificial"           // opcional (str)
+  "segmento": "Inteligência Artificial",          // opcional (str)
+  "contexto": "Ligação de teste"                  // opcional (str)
 }
 ```
 
@@ -63,6 +64,7 @@ payload = {
     "Prompt_id": "24",
     "empresa": "MindFlow Agency",
     "segmento": "Inteligência Artificial",
+    "contexto": "Ligação de teste",
     "quando_ligar": "2026-04-20T15:00:00-03:00"
 }
 ```

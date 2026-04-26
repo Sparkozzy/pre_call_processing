@@ -200,6 +200,7 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
                 "customer_name": payload_ref.get("nome") or payload_ref.get("customer_name") or "Lead",
                 "empresa": payload_ref.get("empresa") or "Empresa",
                 "segmento": payload_ref.get("segmento") or "Segmento",
+                "contexto": payload_ref.get("contexto") or "Contexto",
                 "email": payload_ref.get("email", ""),
                 "numero_do_lead": payload_ref.get("numero") or payload_ref.get("numero_do_lead", ""),
                 "now": get_br_now().strftime("%d/%m/%Y %H:%M"),
@@ -260,9 +261,10 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
                     "customer_name": p.get("nome"),
                     "prompt": fd.get("agent_prompt"),
                     "now": get_utc_now(), # ISO UTC para Retell
-                    "contexto": f"Empresa: {p.get('empresa')}\nSegmento: {p.get('segmento')}",
+                    "contexto": p.get("contexto") or f"Empresa: {p.get('empresa')}\nSegmento: {p.get('segmento')}",
                     "numero_do_lead": p.get("numero"),
                     "empresa": p.get("empresa"),
+                    "segmento": p.get("segmento"),
                     "email": p.get("email")
                 }
             }

@@ -26,7 +26,7 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(REDIS_URL)
     
     # Número de jobs correntes (Ajustar baseado na capacidade de I/O)
-    max_jobs = 50
+    max_jobs = 15
     
     # Garante tentativas em caso de restarts globais (job_timeout)
     job_timeout = 300

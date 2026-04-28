@@ -41,6 +41,12 @@ O fluxo deve registrar o início na tabela `workflow_executions` e cada passo em
 - **Rigor de Agendamento**: O campo `quando_ligar` é obrigatório para decidir o tempo de execução. Se não possuir fuso horário (Timezone Offset), o webhook deve rejeitar com erro 400.
 - Se o `prompt_id` não for encontrado, o workflow deve falhar com erro descritivo.
 
+## Resiliência e Concorrência
+
+Para garantir a estabilidade do sistema sob alta carga:
+- **Retry Local (Step 5)**: Implementado loop de retry específico para erro `429 (Rate Limit)` da Retell AI, com backoff exponencial e jitter (máximo 5 tentativas). Isso mantém o job "congelado" aguardando a liberação da API sem reiniciar o workflow.
+- **Controle de Concorrência**: O Worker ARQ está configurado com `max_jobs = 15` para limitar o número de execuções simultâneas e evitar saturação da API externa.
+
 
 ## Server and deploy
 

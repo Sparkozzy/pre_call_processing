@@ -11,16 +11,16 @@ O banco possui **três camadas lógicas** de tabelas:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  CAMADA DE RASTREABILIDADE (EDW) — Padrão Mestre-Detalhe   │
+│  CAMADA DE RASTREABILIDADE (EDW) — Padrão Mestre-Detalhe    │
 │  workflow_executions  ←─────  workflow_step_executions      │
 │  model_executions                                           │
 ├─────────────────────────────────────────────────────────────┤
-│  CAMADA DE DADOS DO NEGÓCIO (Fonte de Dados dos Modelos)   │
+│  CAMADA DE DADOS DO NEGÓCIO (Fonte de Dados dos Modelos)    │
 │  Retell_calls_Mindflow    Leads_Mindflow                    │
 │  Prompts                  Comercial_Mindflow                │
 │  Retell_Leads_Midflow                                       │
 ├─────────────────────────────────────────────────────────────┤
-│  CAMADA DE REGRAS / CONTROLE                               │
+│  CAMADA DE REGRAS / CONTROLE                                │
 │  Blacklist_Mindflow    Blacklist_Email                      │
 │  Buffer                documents_fil                        │
 │  n8n_chat_histories                                         │

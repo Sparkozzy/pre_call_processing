@@ -269,13 +269,27 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
                 }
             }
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=retell_payload, headers=headers, timeout=15.0)
+            max_retries = 5
+            attempt = 0
             
-            if response.status_code not in [200, 201]:
-                raise Exception(f"Erro Retell AI ({response.status_code}): {response.text}")
-                
-            return response.json()
+            async with httpx.AsyncClient() as client:
+                while attempt < max_retries:
+                    response = await client.post(url, json=retell_payload, headers=headers, timeout=15.0)
+                    
+                    if response.status_code == 429:
+                        attempt += 1
+                        # Backoff exponencial com jitter (espera local) para dispersar requests
+                        wait_time = (2 ** attempt) + random.randint(1, 10)
+                        print(f"Rate limit (429) na Retell. Tentativa {attempt}/{max_retries}. Aguardando {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                        
+                    if response.status_code not in [200, 201]:
+                        raise Exception(f"Erro Retell AI ({response.status_code}): {response.text}")
+                        
+                    return response.json()
+            
+            raise Exception(f"Falha na Retell AI após {max_retries} tentativas de Rate Limit (429).")
 
         retell_res = await run_step_with_retry(
             execution_id, 

@@ -54,6 +54,7 @@ class WebhookPayload(BaseModel):
     empresa: Optional[str] = None
     segmento: Optional[str] = None
     contexto: Optional[str] = None
+    from_number: Optional[str] = None
 
     @field_validator('email', mode='before')
     @classmethod

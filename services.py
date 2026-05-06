@@ -250,7 +250,7 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
             }
             
             retell_payload = {
-                "from_number": os.getenv("RETELL_FROM_NUMBER", "iatizeia"),
+                "from_number": p.get("from_number") or os.getenv("RETELL_FROM_NUMBER", "iatizeia"),
                 "to_number": p.get("numero"),
                 "override_agent_id": p.get("agent_id"),
                 "metadata": {

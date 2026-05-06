@@ -30,7 +30,8 @@ O fluxo deve registrar o início na tabela `workflow_executions` e cada passo em
   "quando_ligar": "2026-04-21T15:00:00-03:00",   // opcional (str) — ISO 8601 com timezone
   "empresa": "MindFlow Agency",                   // opcional (str)
   "segmento": "Inteligência Artificial",          // opcional (str)
-  "contexto": "Ligação de teste"                  // opcional (str)
+  "contexto": "Ligação de teste",                 // opcional (str)
+  "from_number": "+555196506656"                  // opcional (str) — Default: iatizeia
 }
 ```
 

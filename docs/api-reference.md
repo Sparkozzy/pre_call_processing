@@ -58,6 +58,7 @@ Documentação de referência para desenvolvedores que consomem o workflow `pre_
 | `quando_ligar` | `string` | `null` | Data/hora para agendar a ligação. Veja seção [Agendamento](#agendamento-quando_ligar) abaixo. Se omitido ou `null`, a ligação é disparada **imediatamente**. |
 | `empresa` | `string` | `null` | Nome da empresa do destinatário. Injetado como variável de contexto no prompt dinâmico. |
 | `segmento` | `string` | `null` | Segmento de atuação da empresa. Injetado como variável de contexto no prompt dinâmico. |
+| `from_number` | `string` | `iatizeia` | Número remetente da ligação (ex: número específico para WhatsApp). Se omitido, utiliza o padrão configurado. |
 
 ---
 
@@ -142,7 +143,8 @@ curl -X POST https://call-github.bkpxmb.easypanel.host/webhook \
     "Prompt_id": "24",
     "quando_ligar": "2026-04-21T14:30:00-03:00",
     "empresa": "TechCorp",
-    "segmento": "SaaS"
+    "segmento": "SaaS",
+    "from_number": "+555196506656"
   }'
 ```
 

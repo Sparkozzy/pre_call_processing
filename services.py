@@ -249,6 +249,21 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
                 "Content-Type": "application/json"
             }
             
+            dynamic_vars = {
+                "customer_name": p.get("nome"),
+                "prompt": fd.get("agent_prompt"),
+                "now": get_utc_now(), # ISO UTC para Retell
+                "contexto": p.get("contexto") or f"Empresa: {p.get('empresa') or 'Não informada'}\nSegmento: {p.get('segmento') or 'Não informado'}",
+                "numero_do_lead": p.get("numero"),
+                "email": p.get("email")
+            }
+
+            # Apenas envia empresa e segmento se houver valor, evitando erro 400 (must be string) na Retell AI
+            if p.get("empresa"):
+                dynamic_vars["empresa"] = p.get("empresa")
+            if p.get("segmento"):
+                dynamic_vars["segmento"] = p.get("segmento")
+
             retell_payload = {
                 "from_number": p.get("from_number") or os.getenv("RETELL_FROM_NUMBER", "iatizeia"),
                 "to_number": p.get("numero"),
@@ -257,16 +272,7 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
                     "workflow_execution_id": execution_id,
                     "workflow_name": workflow_name
                 },
-                "retell_llm_dynamic_variables": {
-                    "customer_name": p.get("nome"),
-                    "prompt": fd.get("agent_prompt"),
-                    "now": get_utc_now(), # ISO UTC para Retell
-                    "contexto": p.get("contexto") or f"Empresa: {p.get('empresa')}\nSegmento: {p.get('segmento')}",
-                    "numero_do_lead": p.get("numero"),
-                    "empresa": p.get("empresa"),
-                    "segmento": p.get("segmento"),
-                    "email": p.get("email")
-                }
+                "retell_llm_dynamic_variables": dynamic_vars
             }
             
             max_retries = 5

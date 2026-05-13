@@ -134,7 +134,7 @@ async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: 
     # 4. Sucesso de Receção (202 - Accepted)
     return {
         "status": "success",
-        "message": "Webhook aceito (DEPLOY_VERIFIED), registro mestre criado e delegado para a fila persistente.",
+        "message": "Webhook aceito, registro mestre criado e delegado para a fila persistente.",
         "execution_db_id": db_execution_id
     }
 

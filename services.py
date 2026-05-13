@@ -291,7 +291,7 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
                         continue
                         
                     if response.status_code not in [200, 201]:
-                        raise Exception(f"Erro Retell AI ({response.status_code}): {response.text}")
+                        raise Exception(f"Erro Retell AI ({response.status_code}): {response.text} | Payload enviado: {retell_payload}")
                         
                     return response.json()
             

@@ -18,5 +18,6 @@ A causa raiz foi o envio de valores `null` (None em Python) para os campos `empr
 - IDs de execução afetados: `89954a7d-ed77-4e78-8470-7be1747916e6`, `59dc550c-5351-4f33-acb8-6cf1de9a4b2d`, etc.
 - Erro validado via logs do Supabase.
 
-### Próximos Passos
-- Realizar teste de integração com o número padrão `+5548996027108` enviando payload sem empresa/segmento.
+### Segunda Tentativa - 2026-05-13
+- Adicionado o payload enviado na mensagem de exceção para confirmar se o servidor está executando a versão correta do código.
+- Suspeita de delay no deploy do Easypanel.

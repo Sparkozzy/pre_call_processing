@@ -12,3 +12,4 @@ httpx
 pytest
 arq
 redis
+python-multipart

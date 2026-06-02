@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from arq.connections import RedisSettings
 
 # Importa as rotinas que serão processadas em background pelos workers
-from services import schedule_execution_node, continue_workflow_execution
+from services import schedule_execution_node, continue_workflow_execution, ingest_csv_batch, clean_cancelled_jobs
 
 load_dotenv()
 
@@ -19,7 +19,9 @@ class WorkerSettings:
     """
     functions = [
         schedule_execution_node, 
-        continue_workflow_execution
+        continue_workflow_execution,
+        ingest_csv_batch,
+        clean_cancelled_jobs
     ]
     
     # URL de Conexão com o Redis

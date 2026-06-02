@@ -2,6 +2,8 @@ import asyncio
 import httpx
 import os
 import random
+import uuid
+import csv
 from datetime import datetime, timezone
 import zoneinfo
 from database import get_supabase_async
@@ -157,6 +159,40 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
     workflow_name = payload.get('workflow_name', 'envia_ligacao')
     supabase_async = await get_supabase_async()
     
+    # 0. Checagem do Kill Switch (Cancelamento)
+    batch_id = payload.get("from_batch_id")
+    is_cancelled = False
+    
+    try:
+        # Checa flag global no Redis
+        global_status = await ctx['redis'].get("system:status")
+        if global_status in [b"cancelled", "cancelled"]:
+            is_cancelled = True
+            
+        # Checa flag do lote específico no Redis
+        if batch_id and not is_cancelled:
+            batch_status = await ctx['redis'].get(f"batch:{batch_id}:status")
+            if batch_status in [b"cancelled", "cancelled"]:
+                is_cancelled = True
+    except Exception as re:
+        print(f"⚠️ Erro ao consultar flags de cancelamento no Redis: {re}")
+
+    if is_cancelled:
+        print(f"⚠️ Chamada para lead {payload.get('numero')} abortada: lote/sistema cancelado.")
+        try:
+            # Finaliza a execução individual marcando como pulada (SUCCESS por negócio, no-op)
+            await supabase_async.table('workflow_executions').update({
+                'status': 'SUCCESS',
+                'output_data': {
+                    "status": "Chamada ignorada (Lote ou sistema cancelado pelo usuário)",
+                    "execution_type": "Cancelled/Skipped"
+                },
+                'completed_at': get_utc_now()
+            }).eq('id', execution_id).execute()
+        except Exception as se:
+            print(f"⚠️ Erro ao atualizar cancelamento do lead no Supabase: {se}")
+        return
+
     try:
         # Atualiza status para RUNNING 
         await supabase_async.table('workflow_executions').update({'status': 'RUNNING'}).eq('id', execution_id).execute()
@@ -326,3 +362,245 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
             'completed_at': get_utc_now()
         }).eq('id', execution_id).execute()
         print(f"Falha na continuação do workflow {execution_id}: {e}")
+
+async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: str, frequencia: float, agent_id: str, prompt_id: str):
+    """
+    Worker Job:
+    1. Abre o arquivo CSV de forma leve e iterativa.
+    2. Registra o passo 'csv_scheduling_ingestion' em workflow_step_executions.
+    3. Mapeia as colunas extras de cada linha para o contexto do lead.
+    4. Enfileira o disparo de cada lead com agendamento temporal indexado (delay = i * frequencia) no Redis.
+    5. Atualiza o status mestre do lote na workflow_executions para SUCCESS ao concluir.
+    6. Exclui o arquivo CSV temporário do disco de forma limpa.
+    """
+    print(f"🚀 Iniciando processamento de lote via CSV para o lote {batch_id}...")
+    supabase_async = await get_supabase_async()
+    started_at = get_utc_now()
+    step_full_name = "csv_scheduling_ingestion"
+    
+    # 1. Cria o registro do passo no Supabase
+    try:
+        step_record = await supabase_async.table('workflow_step_executions').insert({
+            'execution_id': batch_id,
+            'step_name': step_full_name,
+            'status': 'RUNNING',
+            'attempt': 1,
+            'input_data': {
+                'file_path': file_path,
+                'frequencia': frequencia,
+                'agent_id': agent_id,
+                'prompt_id': prompt_id
+            },
+            'started_at': started_at
+        }).execute()
+        step_db_id = step_record.data[0]['id']
+    except Exception as e:
+        print(f"⚠️ Erro ao registrar passo de ingestão de CSV no Supabase: {e}")
+        step_db_id = None
+
+    try:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Arquivo CSV temporário {file_path} não encontrado no disco.")
+
+        # Lógica de leitura do CSV de forma leve (linha por linha, sem Pandas inteiro na RAM)
+        leads = []
+        with open(file_path, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            # Normaliza as chaves do dicionário para minúsculas
+            fieldnames_normalized = [field.strip().lower() for field in reader.fieldnames]
+            
+            # Mapeamento de índices originais para normalizados
+            field_map = {field.strip().lower(): field for field in reader.fieldnames}
+            
+            required_cols = ["numero", "nome", "email"]
+            for col in required_cols:
+                if col not in fieldnames_normalized:
+                    raise ValueError(f"Coluna obrigatória '{col}' ausente no arquivo CSV.")
+            
+            col_extra = [field for field in fieldnames_normalized if field not in required_cols]
+
+            for row in reader:
+                # Normaliza chaves da linha
+                row_norm = {k.strip().lower(): v for k, v in row.items() if k}
+                
+                num_val = row_norm["numero"].strip()
+                nome_val = row_norm["nome"].strip()
+                
+                # Validação de e-mail vazio/nulo -> fallback para "."
+                email_val = row_norm.get("email", "").strip()
+                if not email_val or email_val in ["", "."]:
+                    email_val = "."
+                
+                # Mapeia colunas adicionais para o contexto do lead
+                contexto_lead = contexto_global or ""
+                extra_parts = []
+                for extra in col_extra:
+                    orig_key = field_map[extra]
+                    val = row.get(orig_key, "").strip()
+                    if val:
+                        extra_parts.append(f"{orig_key}: {val}")
+                
+                if extra_parts:
+                    extra_str = "; ".join(extra_parts) + "; "
+                    if contexto_lead and not contexto_lead.endswith(" "):
+                        contexto_lead += " "
+                    contexto_lead += extra_str
+                
+                leads.append({
+                    "numero": num_val,
+                    "nome": nome_val,
+                    "email": email_val,
+                    "contexto": contexto_lead
+                })
+
+        total_leads = len(leads)
+        print(f"📊 Lote {batch_id} carregou {total_leads} leads do CSV. Enfileirando...")
+
+        # 2. Enfileira temporalmente no Redis em chunks assíncronos
+        from datetime import timedelta
+        
+        chunk_size = 2000
+        for chunk_start in range(0, total_leads, chunk_size):
+            # Verifica se o lote foi cancelado emergencialmente enquanto estamos enfileirando
+            is_cancelled = False
+            try:
+                global_status = await ctx['redis'].get("system:status")
+                batch_status = await ctx['redis'].get(f"batch:{batch_id}:status")
+                if global_status in [b"cancelled", "cancelled"] or batch_status in [b"cancelled", "cancelled"]:
+                    is_cancelled = True
+            except Exception as re:
+                print(f"⚠️ Erro ao checar cancelamento na ingestão: {re}")
+                
+            if is_cancelled:
+                raise Exception("A ingestão do lote foi interrompida devido ao cancelamento ativado pelo usuário.")
+
+            chunk = leads[chunk_start : chunk_start + chunk_size]
+            
+            enqueue_tasks = []
+            for j, lead in enumerate(chunk):
+                lead_index = chunk_start + j
+                delay_sec = lead_index * frequencia
+                data_agendada = get_br_now() + timedelta(seconds=delay_sec)
+                
+                lead_execution_id = str(uuid.uuid4())
+                lead_payload = {
+                    "workflow_name": "pre_call_processing",
+                    "execution_id": lead_execution_id,
+                    "numero": lead["numero"],
+                    "nome": lead["nome"],
+                    "email": lead["email"],
+                    "agent_id": agent_id,
+                    "Prompt_id": prompt_id,
+                    "quando_ligar": data_agendada.isoformat(),
+                    "contexto": lead["contexto"],
+                    "from_batch_id": batch_id
+                }
+                
+                # Enfileira passando _job_id customizado para permitir scan e deleção gradual
+                enqueue_tasks.append(
+                    ctx['redis'].enqueue_job(
+                        'schedule_execution_node',
+                        lead_execution_id,
+                        lead_payload,
+                        _defer_until=data_agendada,
+                        _job_id=f"job:{batch_id}:{lead_execution_id}"
+                    )
+                )
+                
+            # Executa o enfileiramento das chaves no Redis em paralelo controlado
+            await asyncio.gather(*enqueue_tasks)
+            # Pequena pausa para liberar a CPU do worker
+            await asyncio.sleep(0.1)
+
+        # 3. Finaliza com sucesso no Supabase
+        if step_db_id:
+            await supabase_async.table('workflow_step_executions').update({
+                'status': 'SUCCESS',
+                'output_data': {
+                    'status': 'CSV processado com sucesso',
+                    'total_leads': total_leads,
+                    'ingested_at': get_utc_now()
+                },
+                'completed_at': get_utc_now()
+            }).eq('id', step_db_id).execute()
+
+        await supabase_async.table('workflow_executions').update({
+            'status': 'SUCCESS',
+            'output_data': {
+                'status': 'Processamento de lote CSV concluído',
+                'total_leads': total_leads,
+                'completed_at': get_utc_now()
+            },
+            'completed_at': get_utc_now()
+        }).eq('id', batch_id).execute()
+
+        print(f"✅ Lote {batch_id} ingerido com sucesso: {total_leads} ligações agendadas temporalmente.")
+
+    except Exception as err:
+        print(f"❌ Falha crítica ao processar lote de CSV {batch_id}: {err}")
+        
+        # Atualiza o passo para FAILED
+        if step_db_id:
+            try:
+                await supabase_async.table('workflow_step_executions').update({
+                    'status': 'FAILED',
+                    'error_details': str(err),
+                    'completed_at': get_utc_now()
+                }).eq('id', step_db_id).execute()
+            except Exception:
+                pass
+                
+        # Atualiza o mestre para FAILED
+        try:
+            await supabase_async.table('workflow_executions').update({
+                'status': 'FAILED',
+                'error_details': f"Falha na ingestão do CSV: {err}",
+                'completed_at': get_utc_now()
+            }).eq('id', batch_id).execute()
+        except Exception:
+            pass
+
+    finally:
+        # Exclui o arquivo temporário localmente
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"🧹 Arquivo temporário {file_path} excluído do disco.")
+        except Exception as e:
+            print(f"⚠️ Erro ao remover arquivo CSV temporário do disco: {e}")
+
+async def clean_cancelled_jobs(ctx, batch_id: str):
+    """
+    Garbage Collector: Varre suavemente o Redis usando SCAN de forma assíncrona
+    para encontrar e deletar os jobs agendados que pertencem ao lote cancelado.
+    Evita spikes na CPU única do Redis rodando deleções graduais.
+    """
+    print(f"🧹 Iniciando limpeza física de jobs do lote cancelado {batch_id} no Redis...")
+    redis_client = ctx['redis']
+    pattern = f"arq:job:job:{batch_id}:*"
+    
+    count = 0
+    cursor = 0
+    try:
+        while True:
+            # Varredura não bloqueante (SCAN) com contagem de 200 chaves por bloco
+            cursor_res = await redis_client.scan(cursor=cursor, match=pattern, count=200)
+            cursor = int(cursor_res[0])
+            keys = cursor_res[1]
+            
+            if keys:
+                # Converte bytes em strings se necessário
+                keys_str = [k.decode('utf-8') if isinstance(k, bytes) else k for k in keys]
+                # Deleta em bloco no Redis
+                await redis_client.delete(*keys_str)
+                count += len(keys_str)
+                
+                # Pequeno delay de 10ms para dispersar carga no Redis
+                await asyncio.sleep(0.01)
+                
+            if cursor == 0:
+                break
+                
+        print(f"🧹 Limpeza física concluída: {count} chaves de agendamentos removidas do Redis para o lote {batch_id}.")
+    except Exception as e:
+        print(f"⚠️ Erro durante a varredura e limpeza de jobs cancelados no Redis: {e}")

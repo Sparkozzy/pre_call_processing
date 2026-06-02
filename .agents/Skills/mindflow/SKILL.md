@@ -42,3 +42,29 @@ Celular precisa ter o 9 como nono dígito (total de 13 dígitos após `+`).
 - `401 Unauthorized`: API Key inválida ou ausente.
 - `400 Bad Request`: Falha na formatação de `numero` ou `quando_ligar`.
 - `422 Unprocessable Entity`: Campos obrigatórios ausentes ou tipos errados.
+
+## call_predict
+
+O workflow `call_predict` avalia a qualidade do lead (Lead Scoring) e prediz o melhor horário para ligar (Timing Predict) antes de encaminhar para o processamento de chamadas.
+
+**Endpoint:** `POST https://call-predict-github.bkpxmb.easypanel.host/webhook/predict`
+**Autenticação:** Header `X-API-Key`
+
+### Payload Obrigatório (JSON)
+
+```json
+{
+  "numero": "+55DDXXXXXXXXX",
+  "agent_id": "agent_1e4cfa23e3910c557d82167949",
+  "nome": "João Silva",
+  "email": "joao@example.com",
+  "Prompt_id": "24"
+}
+```
+
+### Respostas Esperadas
+- `202 Accepted`: Lead enfileirado para predição. Retorna `execution_id`.
+- `400 Bad Request`: Número fora do formato internacional.
+- `401 Unauthorized`: API Key inválida.
+- `422 Unprocessable Entity`: Campos obrigatórios ausentes.
+

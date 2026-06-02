@@ -218,31 +218,147 @@ console.log(data.execution_db_id); // UUID para rastreamento
 
 ---
 
+## Agendamento em Lote via CSV (Bulk Scheduling)
+
+Permite o agendamento em massa de ligações disparadas a partir de um arquivo CSV, com distribuição temporal controlada por frequência e suporte a cancelamento imediato de chamadas programadas.
+
+### Endpoint: `/webhook/csv`
+
+| Propriedade | Valor |
+| :--- | :--- |
+| **URL** | `https://call-github.bkpxmb.easypanel.host/webhook/csv` |
+| **Método** | `POST` |
+| **Content-Type** | `multipart/form-data` |
+| **Autenticação** | Header `X-API-Key` obrigatório |
+| **Resposta de sucesso** | `200 OK` |
+
+#### Parâmetros do Formulário (Form-Data)
+
+| Campo | Tipo | Obrigatório | Descrição |
+| :--- | :---: | :---: | :--- |
+| `file` | `file` | ✅ | Arquivo `.csv` contendo as colunas obrigatórias no cabeçalho: `numero`, `nome` e `email`. |
+| `frequencia` | `float` | ✅ | Intervalo em segundos entre cada disparo ($\ge 1$). Ex: `60` agendará ligações a cada 1 minuto. |
+| `agent_id` | `string` | ✅ | ID do agente configurado na plataforma Retell AI. |
+| `prompt_id` | `string` | ✅ | ID do prompt no Supabase (numérico ou textual). |
+| `contexto` | `string` | ❌ | Contexto base global da chamada. |
+
+#### Regras do Arquivo CSV e Validação
+1.  **Cabeçalho**: A primeira linha do CSV deve conter obrigatoriamente as colunas `numero`, `nome` e `email` (independente da ordem).
+2.  **Valores Obrigatórios**: As colunas `numero` e `nome` não podem conter valores vazios. O campo `numero` deve obrigatoriamente começar com `+` (DDI do país).
+3.  **Fallback de E-mail**: Se o e-mail estiver em branco em alguma linha, a API o aceita automaticamente e o converte para o valor `"."` (um único ponto) para evitar falhas no Pydantic.
+4.  **Colunas Adicionais**: Quaisquer outras colunas incluídas no CSV (ex: `cidade`, `valor_divida`) são mapeadas automaticamente e concatenadas de forma dinâmica ao final do `contexto` individual daquele lead no formato `"nome: valor; "`.
+5.  **Distribuição Temporal Indexada**: Os disparos são agendados sequencialmente. O lead do index $i$ (iniciando em 0) é agendado com atraso de $i \times frequencia$ segundos no fuso de Brasília (`America/Sao_Paulo`).
+
+#### Resposta de Sucesso (`200 OK`)
+```json
+{
+  "status": "success",
+  "message": "Arquivo CSV validado com sucesso e enfileirado para processamento assíncrono.",
+  "batch_id": "8939723b-2a96-462d-a048-33b0e60b0478",
+  "total_leads": 12500
+}
+```
+
+---
+
+### Endpoint: `/webhook/csv/cancel` (Kill Switch)
+
+Permite suspender de imediato disparos agendados no Redis que ainda não foram efetuados, evitando picos de custos ou erros de envio.
+
+| Propriedade | Valor |
+| :--- | :--- |
+| **URL** | `https://call-github.bkpxmb.easypanel.host/webhook/csv/cancel` |
+| **Método** | `POST` |
+| **Content-Type** | `application/x-www-form-urlencoded` ou `multipart/form-data` |
+| **Autenticação** | Header `X-API-Key` obrigatório |
+| **Resposta de sucesso** | `200 OK` |
+
+#### Parâmetros do Formulário (Form-Data / URL-Encoded)
+
+| Campo | Tipo | Obrigatório | Descrição |
+| :--- | :---: | :---: | :--- |
+| `batch_id` | `string` | ❌ | UUID do lote gerado pelo endpoint `/webhook/csv`. Se omitido, aciona o **Panic Button** e cancela **TODOS** os lotes ativos no sistema. |
+
+#### Resposta de Sucesso (`200 OK`)
+```json
+{
+  "status": "success",
+  "message": "Interrupção do lote 8939723b-2a96-462d-a048-33b0e60b0478 ativada. Novos disparos foram bloqueados com sucesso.",
+  "batch_id": "8939723b-2a96-462d-a048-33b0e60b0478"
+}
+```
+
+---
+
+## Exemplos de Integração em Lote (CSV)
+
+### 1. Upload de CSV via cURL
+```bash
+curl -X POST https://call-github.bkpxmb.easypanel.host/webhook/csv \
+  -H "X-API-Key: sua-chave-api-aqui" \
+  -F "file=@/caminho/do/meu/arquivo.csv" \
+  -F "frequencia=60" \
+  -F "agent_id=agent_1e4cfa23e3910c557d82167949" \
+  -F "prompt_id=24" \
+  -F "contexto=Campanha de Reengajamento"
+```
+
+### 2. Cancelamento de Lote via cURL
+```bash
+curl -X POST https://call-github.bkpxmb.easypanel.host/webhook/csv/cancel \
+  -H "X-API-Key: sua-chave-api-aqui" \
+  -F "batch_id=8939723b-2a96-462d-a048-33b0e60b0478"
+```
+
+### 3. Ingestão de CSV em Python (httpx)
+```python
+import httpx
+
+url = "https://call-github.bkpxmb.easypanel.host/webhook/csv"
+headers = {"X-API-Key": "sua-chave-api-aqui"}
+
+files = {"file": ("leads.csv", open("leads.csv", "rb"), "text/csv")}
+data = {
+    "frequencia": 30.0,
+    "agent_id": "agent_1e4cfa23e3910c557d82167949",
+    "prompt_id": "24",
+    "contexto": "Lote Promocional Junho"
+}
+
+with httpx.Client() as client:
+    response = client.post(url, headers=headers, files=files, data=data)
+    print(response.status_code)  # 200
+    print(response.json())       # {"status": "success", "batch_id": "..."}
+```
+
+---
+
 ## Rastreabilidade
 
-Após receber o `execution_db_id` na resposta `202`, é possível acompanhar o ciclo de vida da execução consultando o Supabase:
+Após receber a confirmação de sucesso, é possível acompanhar todo o ciclo de vida e passos executados no Supabase de forma nativa:
 
-### Status do Workflow (tabela `workflow_executions`)
+### Status de Execução (tabela `workflow_executions`)
 
-| Status | Significado |
-| :--- | :--- |
-| `PENDING` | Payload aceito, aguardando processamento ou agendamento. |
-| `RUNNING` | Worker iniciou a execução dos nós (fetch_prompt → format → retell_call). |
-| `SUCCESS` | Ligação criada com sucesso na Retell AI. O campo `output_data` contém o `call_id`. |
-| `FAILED` | Falha em algum nó após todas as tentativas de retry. O campo `error_details` contém a razão. |
+O lote do CSV é mapeado como uma execução sob o nome de `"csv_scheduling"`, onde o `id` é o `batch_id`:
 
-### Passos Executados (tabela `workflow_step_executions`)
+| Workflow Name | Status | Significado |
+| :--- | :--- | :--- |
+| `csv_scheduling` | `RUNNING` | Arquivo CSV validado. Worker está processando o enfileiramento das ligações em chunks. |
+| `csv_scheduling` | `SUCCESS` | Ingestão concluída com sucesso. Todos os leads foram agendados no Redis. |
+| `csv_scheduling` | `FAILED` | Falha ao processar o CSV ou lote interrompido/cancelado pelo usuário. |
+| `pre_call_processing` | `RUNNING` | A ligação de um lead individual do lote alcançou sua hora de disparo e foi iniciada. |
+| `pre_call_processing` | `SUCCESS` | A chamada individual do lote foi completada (contém `trigger_event_id` = `batch_id`). |
 
-Cada nó gera um registro imutável com `execution_id` apontando para o registro mestre:
+### Passos de Execução (tabela `workflow_step_executions`)
+
+Registra o progresso de leitura e ingestão em background do lote:
 
 | Step Name | Descrição |
 | :--- | :--- |
-| `pre_call_processing_agendamento_redis` | Decisão de execução imediata vs agendamento futuro. |
-| `pre_call_processing_fetch_prompt` | Busca do prompt dinâmico no Supabase. |
-| `pre_call_processing_format_payload` | Substituição de variáveis e limpeza de Markdown. |
-| `pre_call_processing_create_retell_call` | Chamada à API da Retell AI para disparar a ligação. |
+| `csv_scheduling_ingestion` | Leitura assíncrona do CSV em chunks de 2.000 linhas, cálculo do delay indexado e enfileiramento das tarefas no Redis. |
+| `pre_call_processing_agendamento_redis` | Verificação do Kill Switch rápido (Redis flag) no instante do disparo e prosseguimento do nó. |
 
 ---
 
 > [!TIP]
-> A documentação interativa (Swagger UI) está disponível em: `https://call-github.bkpxmb.easypanel.host/docs`
+> A documentação interativa (Swagger UI) com suporte a testes de endpoints está disponível em: `https://call-github.bkpxmb.easypanel.host/docs`

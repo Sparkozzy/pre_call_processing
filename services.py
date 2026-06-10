@@ -459,6 +459,13 @@ async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: 
         # 2. Enfileira temporalmente no Redis em chunks assíncronos
         from datetime import timedelta
         
+        current_schedule_time = get_br_now()
+        if current_schedule_time.hour >= 22:
+            current_schedule_time = current_schedule_time + timedelta(days=1)
+            current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
+        elif current_schedule_time.hour < 8:
+            current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
+
         chunk_size = 2000
         for chunk_start in range(0, total_leads, chunk_size):
             # Verifica se o lote foi cancelado emergencialmente enquanto estamos enfileirando
@@ -479,8 +486,17 @@ async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: 
             enqueue_tasks = []
             for j, lead in enumerate(chunk):
                 lead_index = chunk_start + j
-                delay_sec = lead_index * frequencia
-                data_agendada = get_br_now() + timedelta(seconds=delay_sec)
+                if lead_index > 0:
+                    current_schedule_time = current_schedule_time + timedelta(seconds=frequencia)
+                
+                # Garante que está no intervalo de 08:00 às 22:00
+                if current_schedule_time.hour >= 22:
+                    current_schedule_time = current_schedule_time + timedelta(days=1)
+                    current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
+                elif current_schedule_time.hour < 8:
+                    current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
+                
+                data_agendada = current_schedule_time
                 
                 lead_execution_id = str(uuid.uuid4())
                 lead_payload = {

@@ -1,7 +1,7 @@
 import os
 import io
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 # 1. Mock do Supabase Client para isolamento completo em testes
@@ -26,26 +26,47 @@ async def mock_get_supabase_async():
     mock_client.table.return_value = mock_table
     return mock_client
 
-# Injeta mocks nos módulos antes de importar o app
 import database
-database.get_supabase_async = mock_get_supabase_async
-
 import services
-services.get_supabase_async = mock_get_supabase_async
-
 import main
+
 if not main.WEBHOOK_API_KEY:
     main.WEBHOOK_API_KEY = "teste_key"
 
-# 2. Configura o TestClient e mocka a conexão de lifespan do Redis
 api_key = main.WEBHOOK_API_KEY
 client = TestClient(main.app)
 
-# Injeta mock do Redis no app state após inicialização para os endpoints síncronos
-main.app.state.redis = MagicMock()
-main.app.state.redis.enqueue_job = AsyncMock()
-main.app.state.redis.get = AsyncMock(return_value=None)
-main.app.state.redis.set = AsyncMock()
+@pytest.fixture(autouse=True)
+def setup_csv_mocks():
+    # Salva originais
+    orig_db = database.get_supabase_async
+    orig_srv = services.get_supabase_async
+    orig_main = main.get_supabase_async
+    orig_redis = getattr(main.app.state, 'redis', None)
+    
+    # Injeta mocks
+    database.get_supabase_async = mock_get_supabase_async
+    services.get_supabase_async = mock_get_supabase_async
+    main.get_supabase_async = mock_get_supabase_async
+    
+    mock_redis = MagicMock()
+    mock_redis.enqueue_job = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=None)
+    mock_redis.set = AsyncMock()
+    
+    main.app.state.redis = mock_redis
+    
+    yield mock_redis
+    
+    # Restaura originais
+    database.get_supabase_async = orig_db
+    services.get_supabase_async = orig_srv
+    main.get_supabase_async = orig_main
+    if orig_redis is not None:
+        main.app.state.redis = orig_redis
+    else:
+        if hasattr(main.app.state, 'redis'):
+            delattr(main.app.state, 'redis')
 
 def test_csv_webhook_auth_failure():
     """Valida se requisições sem API Key válida são rejeitadas com 401."""
@@ -168,6 +189,56 @@ def test_csv_cancel_global():
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert "Panic Button ativado" in response.json()["message"]
+
+@pytest.mark.asyncio
+async def test_csv_scheduling_business_hours(setup_csv_mocks):
+    """Valida se chamadas agendadas para fora do horário comercial são empurradas para as 08:00."""
+    mock_redis = setup_csv_mocks
+    
+    import datetime
+    import zoneinfo
+    # Mock get_br_now to return 22:30 (forbidden time) on June 10
+    forbidden_time = datetime.datetime(2026, 6, 10, 22, 30, tzinfo=zoneinfo.ZoneInfo("America/Sao_Paulo"))
+    
+    with patch("services.get_br_now", return_value=forbidden_time):
+        ctx = {"redis": mock_redis}
+        
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("numero,nome,email\n+5548991027108,Ryan,ryan@test.com\n+5548991027109,Ivan,ivan@test.com")
+            temp_path = f.name
+            
+        try:
+            await services.ingest_csv_batch(
+                ctx=ctx,
+                batch_id="00000000-0000-0000-0000-000000000000",
+                file_path=temp_path,
+                contexto_global="Teste",
+                frequencia=1200.0, # 20 minutes
+                agent_id="test_agent",
+                prompt_id="22"
+            )
+        finally:
+            import os
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+    # Verify calls enqueued
+    calls = mock_redis.enqueue_job.call_args_list
+    assert len(calls) >= 2
+    
+    defer_1 = calls[0].kwargs.get('_defer_until')
+    defer_2 = calls[1].kwargs.get('_defer_until')
+    
+    # First lead should be 08:00:00 next day
+    assert defer_1.hour == 8
+    assert defer_1.minute == 0
+    assert defer_1.day == 11
+    
+    # Second lead should be 08:20:00 next day
+    assert defer_2.hour == 8
+    assert defer_2.minute == 20
+    assert defer_2.day == 11
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

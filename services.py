@@ -121,6 +121,25 @@ async def schedule_execution_node(ctx, execution_id: str, payload: dict):
     workflow_name = payload.get('workflow_name', 'envia_ligacao')
     quando_ligar_raw = payload.get('quando_ligar')
     
+    supabase_async = await get_supabase_async()
+    
+    # Garante que o registro mestre de execução existe no Supabase (necessário para agendamento em lote do CSV)
+    try:
+        check_res = await supabase_async.table('workflow_executions').select('id').eq('id', execution_id).execute()
+        if not check_res.data:
+            master_data = {
+                'id': execution_id,
+                'workflow_name': workflow_name,
+                'trigger_event_id': payload.get('from_batch_id') or execution_id,
+                'status': 'PENDING',
+                'input_data': payload,
+                'started_at': get_utc_now()
+            }
+            await supabase_async.table('workflow_executions').insert(master_data).execute()
+            print(f"ℹ️ Criou registro mestre de execução no Supabase para o lead {execution_id}")
+    except Exception as e:
+        print(f"⚠️ Erro ao verificar/criar registro mestre de execução: {e}")
+
     if not quando_ligar_raw:
         # Execução imediata
         await continue_workflow_execution(ctx, execution_id, payload)

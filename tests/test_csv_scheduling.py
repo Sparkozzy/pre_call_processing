@@ -231,5 +231,40 @@ async def test_csv_scheduling_business_hours(setup_csv_mocks):
     assert defer_2.minute == 20
     assert defer_2.day == 11
 
+@pytest.mark.asyncio
+async def test_schedule_execution_node_creates_master(setup_csv_mocks):
+    """Valida se o nó cria o registro mestre de execução caso não exista no banco."""
+    mock_redis = setup_csv_mocks
+    
+    from datetime import datetime, timezone, timedelta
+    
+    mock_table = MagicMock()
+    mock_select_res = MagicMock()
+    mock_select_res.data = []
+    mock_insert_res = MagicMock()
+    mock_insert_res.data = [{"id": "some-execution-uuid"}]
+    
+    mock_table.select.return_value.eq.return_value.execute = AsyncMock(return_value=mock_select_res)
+    mock_table.insert.return_value.execute = AsyncMock(return_value=mock_insert_res)
+    
+    mock_supabase = MagicMock()
+    mock_supabase.table.return_value = mock_table
+    
+    with patch("services.get_supabase_async", AsyncMock(return_value=mock_supabase)):
+        ctx = {"redis": mock_redis}
+        execution_id = "test-execution-uuid"
+        
+        # Agendado para o futuro
+        future_date = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        payload = {
+            "workflow_name": "pre_call_processing",
+            "quando_ligar": future_date
+        }
+        
+        await services.schedule_execution_node(ctx, execution_id, payload)
+    
+    mock_supabase.table.assert_any_call('workflow_executions')
+    mock_table.insert.assert_called()
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

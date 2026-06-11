@@ -395,6 +395,9 @@ async def debug_redis(request: Request, x_api_key: str = Header(alias="X-API-Key
         )
     
     from datetime import datetime, timezone
+    import zoneinfo
+    
+    br_tz = zoneinfo.ZoneInfo("America/Sao_Paulo")
     
     redis_client = request.app.state.redis
     keys = await redis_client.keys("*")
@@ -404,10 +407,20 @@ async def debug_redis(request: Request, x_api_key: str = Header(alias="X-API-Key
     queue_exists = await redis_client.exists(queue_name)
     
     jobs_in_queue = []
+    batch_counts = {}
+    
     if queue_exists:
         raw_jobs = await redis_client.zrange(queue_name, 0, -1, withscores=True)
         for job_bytes, score in raw_jobs:
             job_id = job_bytes.decode('utf-8') if isinstance(job_bytes, bytes) else str(job_bytes)
+            
+            # Group by batch_id if job_id is like "job:batch_id:lead_id"
+            if job_id.startswith("job:"):
+                parts = job_id.split(":")
+                if len(parts) >= 2:
+                    b_id = parts[1]
+                    batch_counts[b_id] = batch_counts.get(b_id, 0) + 1
+            
             job_key = f"arq:job:{job_id}"
             job_data = await redis_client.get(job_key)
             
@@ -420,11 +433,13 @@ async def debug_redis(request: Request, x_api_key: str = Header(alias="X-API-Key
             jobs_in_queue.append(job_info)
             
     return {
+        "server_time_utc": datetime.now(timezone.utc).isoformat(),
+        "server_time_br": datetime.now(br_tz).isoformat(),
         "total_keys": len(keys_str),
-        "keys": keys_str[:100],
         "queue_exists": queue_exists,
         "jobs_in_queue_count": len(jobs_in_queue),
-        "jobs_in_queue_sample": jobs_in_queue[:50]
+        "batch_counts": batch_counts,
+        "jobs_in_queue_sample": jobs_in_queue[:20]
     }
 
 # Para rodar a API:

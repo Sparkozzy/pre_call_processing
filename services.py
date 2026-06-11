@@ -4,6 +4,7 @@ import os
 import random
 import uuid
 import csv
+import io
 from datetime import datetime, timezone
 import zoneinfo
 from database import get_supabase_async
@@ -363,15 +364,14 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
         }).eq('id', execution_id).execute()
         print(f"Falha na continuação do workflow {execution_id}: {e}")
 
-async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: str, frequencia: float, agent_id: str, prompt_id: str):
+async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global: str, frequencia: float, agent_id: str, prompt_id: str):
     """
     Worker Job:
-    1. Abre o arquivo CSV de forma leve e iterativa.
+    1. Abre o arquivo CSV de forma leve e iterativa a partir da string em memória.
     2. Registra o passo 'csv_scheduling_ingestion' em workflow_step_executions.
     3. Mapeia as colunas extras de cada linha para o contexto do lead.
-    4. Enfileira o disparo de cada lead com agendamento temporal indexado (delay = i * frequencia) no Redis.
+    4. Enfileira o disparo de cada lead com agendamento temporal indexado no Redis.
     5. Atualiza o status mestre do lote na workflow_executions para SUCCESS ao concluir.
-    6. Exclui o arquivo CSV temporário do disco de forma limpa.
     """
     print(f"🚀 Iniciando processamento de lote via CSV para o lote {batch_id}...")
     supabase_async = await get_supabase_async()
@@ -386,7 +386,7 @@ async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: 
             'status': 'RUNNING',
             'attempt': 1,
             'input_data': {
-                'file_path': file_path,
+                'csv_content_len': len(csv_content),
                 'frequencia': frequencia,
                 'agent_id': agent_id,
                 'prompt_id': prompt_id
@@ -399,59 +399,57 @@ async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: 
         step_db_id = None
 
     try:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Arquivo CSV temporário {file_path} não encontrado no disco.")
-
-        # Lógica de leitura do CSV de forma leve (linha por linha, sem Pandas inteiro na RAM)
+        # Lógica de leitura do CSV de forma leve a partir de StringIO
         leads = []
-        with open(file_path, mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            # Normaliza as chaves do dicionário para minúsculas
-            fieldnames_normalized = [field.strip().lower() for field in reader.fieldnames]
-            
-            # Mapeamento de índices originais para normalizados
-            field_map = {field.strip().lower(): field for field in reader.fieldnames}
-            
-            required_cols = ["numero", "nome", "email"]
-            for col in required_cols:
-                if col not in fieldnames_normalized:
-                    raise ValueError(f"Coluna obrigatória '{col}' ausente no arquivo CSV.")
-            
-            col_extra = [field for field in fieldnames_normalized if field not in required_cols]
+        csv_file = io.StringIO(csv_content)
+        reader = csv.DictReader(csv_file)
+        
+        # Normaliza as chaves do dicionário para minúsculas
+        fieldnames_normalized = [field.strip().lower() for field in reader.fieldnames]
+        
+        # Mapeamento de índices originais para normalizados
+        field_map = {field.strip().lower(): field for field in reader.fieldnames}
+        
+        required_cols = ["numero", "nome", "email"]
+        for col in required_cols:
+            if col not in fieldnames_normalized:
+                raise ValueError(f"Coluna obrigatória '{col}' ausente no arquivo CSV.")
+        
+        col_extra = [field for field in fieldnames_normalized if field not in required_cols]
 
-            for row in reader:
-                # Normaliza chaves da linha
-                row_norm = {k.strip().lower(): v for k, v in row.items() if k}
-                
-                num_val = row_norm["numero"].strip()
-                nome_val = row_norm["nome"].strip()
-                
-                # Validação de e-mail vazio/nulo -> fallback para "."
-                email_val = row_norm.get("email", "").strip()
-                if not email_val or email_val in ["", "."]:
-                    email_val = "."
-                
-                # Mapeia colunas adicionais para o contexto do lead
-                contexto_lead = contexto_global or ""
-                extra_parts = []
-                for extra in col_extra:
-                    orig_key = field_map[extra]
-                    val = row.get(orig_key, "").strip()
-                    if val:
-                        extra_parts.append(f"{orig_key}: {val}")
-                
-                if extra_parts:
-                    extra_str = "; ".join(extra_parts) + "; "
-                    if contexto_lead and not contexto_lead.endswith(" "):
-                        contexto_lead += " "
-                    contexto_lead += extra_str
-                
-                leads.append({
-                    "numero": num_val,
-                    "nome": nome_val,
-                    "email": email_val,
-                    "contexto": contexto_lead
-                })
+        for row in reader:
+            # Normaliza chaves da linha
+            row_norm = {k.strip().lower(): v for k, v in row.items() if k}
+            
+            num_val = row_norm["numero"].strip()
+            nome_val = row_norm["nome"].strip()
+            
+            # Validação de e-mail vazio/nulo -> fallback para "."
+            email_val = row_norm.get("email", "").strip()
+            if not email_val or email_val in ["", "."]:
+                email_val = "."
+            
+            # Mapeia colunas adicionais para o contexto do lead
+            contexto_lead = contexto_global or ""
+            extra_parts = []
+            for extra in col_extra:
+                orig_key = field_map[extra]
+                val = row.get(orig_key, "").strip()
+                if val:
+                    extra_parts.append(f"{orig_key}: {val}")
+            
+            if extra_parts:
+                extra_str = "; ".join(extra_parts) + "; "
+                if contexto_lead and not contexto_lead.endswith(" "):
+                    contexto_lead += " "
+                contexto_lead += extra_str
+            
+            leads.append({
+                "numero": num_val,
+                "nome": nome_val,
+                "email": email_val,
+                "contexto": contexto_lead
+            })
 
         total_leads = len(leads)
         print(f"📊 Lote {batch_id} carregou {total_leads} leads do CSV. Enfileirando...")
@@ -577,13 +575,7 @@ async def ingest_csv_batch(ctx, batch_id: str, file_path: str, contexto_global: 
             pass
 
     finally:
-        # Exclui o arquivo temporário localmente
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                print(f"🧹 Arquivo temporário {file_path} excluído do disco.")
-        except Exception as e:
-            print(f"⚠️ Erro ao remover arquivo CSV temporário do disco: {e}")
+        pass
 
 async def clean_cancelled_jobs(ctx, batch_id: str):
     """

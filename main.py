@@ -285,33 +285,11 @@ async def receive_csv_webhook(
             detail="Erro interno ao registrar lote de disparos no banco de dados."
         )
 
-    # 4. Salva temporariamente o arquivo CSV localmente
-    os.makedirs("scratch", exist_ok=True)
-    file_path = f"scratch/batch_{batch_uuid}.csv"
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(text_content)
-    except Exception as e:
-        logger.error(f"Erro ao salvar arquivo CSV temporário no disco: {e}")
-        # Tenta atualizar status para FAILED no Supabase antes de falhar
-        try:
-            await supabase_async.table('workflow_executions').update({
-                'status': 'FAILED',
-                'error_details': f'Erro ao salvar CSV no disco: {e}',
-                'completed_at': get_utc_now()
-            }).eq('id', batch_uuid).execute()
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erro ao processar o arquivo CSV localmente no servidor."
-        )
-
-    # 5. Enfileira o job de ingestão no Redis (Worker fará a leitura pesada)
+    # 4. Enfileira o job de ingestão no Redis passando o conteúdo de texto do CSV diretamente (em memória)
     await request.app.state.redis.enqueue_job(
         'ingest_csv_batch', 
         batch_uuid, 
-        file_path, 
+        text_content, 
         contexto, 
         frequencia, 
         agent_id, 

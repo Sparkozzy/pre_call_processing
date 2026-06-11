@@ -202,26 +202,17 @@ async def test_csv_scheduling_business_hours(setup_csv_mocks):
     
     with patch("services.get_br_now", return_value=forbidden_time):
         ctx = {"redis": mock_redis}
+        csv_data = "numero,nome,email\n+5548991027108,Ryan,ryan@test.com\n+5548991027109,Ivan,ivan@test.com"
         
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
-            f.write("numero,nome,email\n+5548991027108,Ryan,ryan@test.com\n+5548991027109,Ivan,ivan@test.com")
-            temp_path = f.name
-            
-        try:
-            await services.ingest_csv_batch(
-                ctx=ctx,
-                batch_id="00000000-0000-0000-0000-000000000000",
-                file_path=temp_path,
-                contexto_global="Teste",
-                frequencia=1200.0, # 20 minutes
-                agent_id="test_agent",
-                prompt_id="22"
-            )
-        finally:
-            import os
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        await services.ingest_csv_batch(
+            ctx=ctx,
+            batch_id="00000000-0000-0000-0000-000000000000",
+            csv_content=csv_data,
+            contexto_global="Teste",
+            frequencia=1200.0, # 20 minutes
+            agent_id="test_agent",
+            prompt_id="22"
+        )
                 
     # Verify calls enqueued
     calls = mock_redis.enqueue_job.call_args_list

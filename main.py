@@ -383,6 +383,50 @@ async def cancel_csv_webhook(
             "cancelled_batches_count": cancelled_count
         }
 
+@app.get("/webhook/debug/redis")
+async def debug_redis(request: Request, x_api_key: str = Header(alias="X-API-Key")):
+    """
+    Diagnostic endpoint to view keys and enqueued jobs in Redis.
+    """
+    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key inválida ou ausente."
+        )
+    
+    from datetime import datetime, timezone
+    
+    redis_client = request.app.state.redis
+    keys = await redis_client.keys("*")
+    keys_str = [k.decode('utf-8') if isinstance(k, bytes) else str(k) for k in keys]
+    
+    queue_name = 'arq:queue'
+    queue_exists = await redis_client.exists(queue_name)
+    
+    jobs_in_queue = []
+    if queue_exists:
+        raw_jobs = await redis_client.zrange(queue_name, 0, -1, withscores=True)
+        for job_bytes, score in raw_jobs:
+            job_id = job_bytes.decode('utf-8') if isinstance(job_bytes, bytes) else str(job_bytes)
+            job_key = f"arq:job:{job_id}"
+            job_data = await redis_client.get(job_key)
+            
+            job_info = {
+                "job_id": job_id,
+                "score_raw": score,
+                "score_datetime_utc": datetime.fromtimestamp(score / 1000, tz=timezone.utc).isoformat() if score else None,
+                "has_data": job_data is not None
+            }
+            jobs_in_queue.append(job_info)
+            
+    return {
+        "total_keys": len(keys_str),
+        "keys": keys_str[:100],
+        "queue_exists": queue_exists,
+        "jobs_in_queue_count": len(jobs_in_queue),
+        "jobs_in_queue_sample": jobs_in_queue[:50]
+    }
+
 # Para rodar a API:
 # uvicorn main:app --reload
 

@@ -5,7 +5,7 @@ import random
 import uuid
 import csv
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import zoneinfo
 from database import get_supabase_async
 
@@ -28,6 +28,28 @@ def parse_iso_to_br(iso_date: str) -> datetime:
         return dt.astimezone(BR_TIMEZONE)
     except Exception as e:
         raise ValueError(f"Formato de data inválido: {iso_date}. Esperado ISO 8601.")
+
+def adjust_to_business_hours(dt: datetime, horario_inicio: str, horario_fim: str) -> datetime:
+    """
+    Garante que a data/hora dt (que deve estar no timezone de Brasília) esteja
+    dentro do intervalo de horário de funcionamento configurado.
+    Se estiver fora, move para o próximo horário disponível.
+    """
+    h_ini_hour, h_ini_min = map(int, horario_inicio.split(":"))
+    h_fim_hour, h_fim_min = map(int, horario_fim.split(":"))
+    
+    # Cria os datetimes de limite para o dia atual de dt
+    dt_start = dt.replace(hour=h_ini_hour, minute=h_ini_min, second=0, microsecond=0)
+    dt_end = dt.replace(hour=h_fim_hour, minute=h_fim_min, second=0, microsecond=0)
+    
+    if dt >= dt_end:
+        # Se passou do limite do dia atual, joga para o início do dia seguinte
+        next_day = dt + timedelta(days=1)
+        return next_day.replace(hour=h_ini_hour, minute=h_ini_min, second=0, microsecond=0)
+    elif dt < dt_start:
+        # Se está antes do limite do dia atual, joga para o início do dia atual
+        return dt_start
+    return dt
 
 def strip_markdown(text: str) -> str:
     """Remove caracteres especiais de Markdown para compatibilidade com TTS/Retell."""
@@ -383,7 +405,7 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
         }).eq('id', execution_id).execute()
         print(f"Falha na continuação do workflow {execution_id}: {e}")
 
-async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global: str, frequencia: float, agent_id: str, prompt_id: str):
+async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global: str, frequencia: float, agent_id: str, prompt_id: str, horario_inicio: str, horario_fim: str):
     """
     Worker Job:
     1. Abre o arquivo CSV de forma leve e iterativa a partir da string em memória.
@@ -407,6 +429,8 @@ async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global
             'input_data': {
                 'csv_content_len': len(csv_content),
                 'frequencia': frequencia,
+                'horario_inicio': horario_inicio,
+                'horario_fim': horario_fim,
                 'agent_id': agent_id,
                 'prompt_id': prompt_id
             },
@@ -477,11 +501,7 @@ async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global
         from datetime import timedelta
         
         current_schedule_time = get_br_now()
-        if current_schedule_time.hour >= 22:
-            current_schedule_time = current_schedule_time + timedelta(days=1)
-            current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
-        elif current_schedule_time.hour < 8:
-            current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
+        current_schedule_time = adjust_to_business_hours(current_schedule_time, horario_inicio, horario_fim)
 
         chunk_size = 2000
         for chunk_start in range(0, total_leads, chunk_size):
@@ -506,13 +526,7 @@ async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global
                 if lead_index > 0:
                     current_schedule_time = current_schedule_time + timedelta(seconds=frequencia)
                 
-                # Garante que está no intervalo de 08:00 às 22:00
-                if current_schedule_time.hour >= 22:
-                    current_schedule_time = current_schedule_time + timedelta(days=1)
-                    current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
-                elif current_schedule_time.hour < 8:
-                    current_schedule_time = current_schedule_time.replace(hour=8, minute=0, second=0, microsecond=0)
-                
+                current_schedule_time = adjust_to_business_hours(current_schedule_time, horario_inicio, horario_fim)
                 data_agendada = current_schedule_time
                 
                 lead_execution_id = str(uuid.uuid4())
@@ -631,3 +645,71 @@ async def clean_cancelled_jobs(ctx, batch_id: str):
         print(f"🧹 Limpeza física concluída: {count} chaves de agendamentos removidas do Redis para o lote {batch_id}.")
     except Exception as e:
         print(f"⚠️ Erro durante a varredura e limpeza de jobs cancelados no Redis: {e}")
+
+async def update_batch_frequency(redis_client, batch_id: str, new_frequencia: float):
+    """
+    Atualiza a frequência de disparos de um lote em andamento.
+    1. Busca no Supabase as configurações originais do lote (para obter horario_inicio e horario_fim).
+    2. Busca no Redis todos os jobs pendentes daquele lote (arq:queue, job:batch_id:*).
+    3. Ordena os jobs cronologicamente pelo score atual (timestamp de agendamento).
+    4. Recalcula os novos timestamps usando a nova frequência a partir do horário atual (get_br_now()),
+       respeitando o intervalo de horario_inicio e horario_fim.
+    5. Atualiza o score de cada job no ZSET arq:queue do Redis.
+    """
+    supabase_async = await get_supabase_async()
+    
+    # 1. Busca os dados do lote
+    res = await supabase_async.table('workflow_executions').select('input_data').eq('id', batch_id).execute()
+    if not res.data:
+        raise ValueError(f"Lote {batch_id} não encontrado no banco de dados.")
+    
+    input_data = res.data[0].get('input_data', {})
+    horario_inicio = input_data.get('horario_inicio', '08:00')
+    horario_fim = input_data.get('horario_fim', '22:00')
+    
+    # 2. Busca na fila do Redis os jobs pendentes do lote
+    queue_name = 'arq:queue'
+    raw_jobs = await redis_client.zrange(queue_name, 0, -1, withscores=True)
+    
+    batch_jobs = []
+    for job_bytes, score in raw_jobs:
+        job_id = job_bytes.decode('utf-8') if isinstance(job_bytes, bytes) else str(job_bytes)
+        if job_id.startswith(f"job:{batch_id}:"):
+            batch_jobs.append((job_id, score))
+            
+    if not batch_jobs:
+        # Sem jobs pendentes
+        input_data['frequencia'] = new_frequencia
+        await supabase_async.table('workflow_executions').update({'input_data': input_data}).eq('id', batch_id).execute()
+        return
+        
+    # 3. Ordena os jobs pelo score atual para manter a ordem relativa original
+    batch_jobs.sort(key=lambda x: x[1])
+    
+    # 4. Recalcula a distribuição cronológica
+    from datetime import timedelta
+    
+    current_schedule_time = get_br_now()
+    current_schedule_time = adjust_to_business_hours(current_schedule_time, horario_inicio, horario_fim)
+    
+    updated_jobs = []
+    for i, (job_id, _) in enumerate(batch_jobs):
+        if i > 0:
+            current_schedule_time = current_schedule_time + timedelta(seconds=new_frequencia)
+        current_schedule_time = adjust_to_business_hours(current_schedule_time, horario_inicio, horario_fim)
+        
+        # Converte datetime de Brasília para Unix Timestamp em Milissegundos
+        new_score = int(current_schedule_time.timestamp() * 1000)
+        updated_jobs.append((job_id, new_score))
+        
+    # 5. Atualiza os scores no Redis via ZADD
+    for job_id, new_score in updated_jobs:
+        await redis_client.zadd('arq:queue', mapping={job_id: new_score})
+        
+    # 6. Atualiza o input_data do lote no Supabase para refletir a nova frequência
+    input_data['frequencia'] = new_frequencia
+    await supabase_async.table('workflow_executions').update({
+        'input_data': input_data
+    }).eq('id', batch_id).execute()
+    
+    print(f"✅ Frequência do lote {batch_id} atualizada para {new_frequencia}s. {len(updated_jobs)} jobs reagendados no Redis.")

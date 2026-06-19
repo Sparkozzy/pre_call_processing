@@ -237,6 +237,8 @@ Permite o agendamento em massa de ligações disparadas a partir de um arquivo C
 | Campo | Tipo | Obrigatório | Descrição |
 | :--- | :---: | :---: | :--- |
 | `file` | `file` | ✅ | Arquivo `.csv` contendo as colunas obrigatórias no cabeçalho: `numero`, `nome` e `email`. |
+| `horario_inicio` | `string` | ✅ | Horário de início do expediente para as ligações no formato `HH:MM` (ex: `08:00`). |
+| `horario_fim` | `string` | ✅ | Horário de término do expediente para as ligações no formato `HH:MM` (ex: `22:00`). |
 | `frequencia` | `float` | ✅ | Intervalo em segundos entre cada disparo ($\ge 1$). Ex: `60` agendará ligações a cada 1 minuto. |
 | `agent_id` | `string` | ✅ | ID do agente configurado na plataforma Retell AI. |
 | `prompt_id` | `string` | ✅ | ID do prompt no Supabase (numérico ou textual). |
@@ -247,7 +249,7 @@ Permite o agendamento em massa de ligações disparadas a partir de um arquivo C
 2.  **Valores Obrigatórios**: As colunas `numero` e `nome` não podem conter valores vazios. O campo `numero` deve obrigatoriamente começar com `+` (DDI do país).
 3.  **Fallback de E-mail**: Se o e-mail estiver em branco em alguma linha, a API o aceita automaticamente e o converte para o valor `"."` (um único ponto) para evitar falhas no Pydantic.
 4.  **Colunas Adicionais**: Quaisquer outras colunas incluídas no CSV (ex: `cidade`, `valor_divida`) são mapeadas automaticamente e concatenadas de forma dinâmica ao final do `contexto` individual daquele lead no formato `"nome: valor; "`.
-5.  **Distribuição Temporal Indexada**: Os disparos são agendados sequencialmente. O lead do index $i$ (iniciando em 0) é agendado com atraso de $i \times frequencia$ segundos no fuso de Brasília (`America/Sao_Paulo`).
+5.  **Distribuição Temporal Indexada**: Os disparos são agendados sequencialmente. O lead do index $i$ (iniciando em 0) é agendado com atraso de $i \times frequencia$ segundos no fuso de Brasília (`America/Sao_Paulo`), respeitando a janela de funcionamento definida em `horario_inicio` e `horario_fim` (ligações fora deste horário são adiadas para o início do expediente seguinte).
 
 #### Resposta de Sucesso (`200 OK`)
 ```json
@@ -290,6 +292,72 @@ Permite suspender de imediato disparos agendados no Redis que ainda não foram e
 
 ---
 
+### Endpoint: `/webhook/csv/update-frequency`
+
+Permite alterar dinamicamente a frequência (intervalo) de disparos de um lote que já está em andamento na fila do Redis.
+
+| Propriedade | Valor |
+| :--- | :--- |
+| **URL** | `https://call-github.bkpxmb.easypanel.host/webhook/csv/update-frequency` |
+| **Método** | `POST` |
+| **Content-Type** | `application/json` |
+| **Autenticação** | Header `X-API-Key` obrigatório |
+| **Resposta de sucesso** | `200 OK` |
+
+#### Corpo da Requisição (JSON Payload)
+
+| Campo | Tipo | Obrigatório | Descrição |
+| :--- | :---: | :---: | :--- |
+| `batch_id` | `string` | ✅ | UUID do lote a ser atualizado. |
+| `frequencia` | `float` | ✅ | Novo intervalo em segundos entre cada disparo ($\ge 1$). |
+
+#### Resposta de Sucesso (`200 OK`)
+```json
+{
+  "status": "success",
+  "message": "Frequência do lote 8939723b-2a96-462d-a048-33b0e60b0478 atualizada para 15.0s com sucesso."
+}
+```
+
+---
+
+### Endpoint: `/webhook/csv/active`
+
+Permite consultar quais lotes (batches) de CSV estão ativos no momento (status `PENDING` ou `RUNNING` no Supabase) e a quantidade de disparos que ainda restam pendentes na fila do Redis.
+
+| Propriedade | Valor |
+| :--- | :--- |
+| **URL** | `https://call-github.bkpxmb.easypanel.host/webhook/csv/active` |
+| **Método** | `GET` |
+| **Autenticação** | Header `X-API-Key` obrigatório |
+| **Resposta de sucesso** | `200 OK` |
+
+#### Resposta de Sucesso (`200 OK`)
+```json
+{
+  "status": "success",
+  "active_batches": [
+    {
+      "batch_id": "8939723b-2a96-462d-a048-33b0e60b0478",
+      "status_supabase": "RUNNING",
+      "started_at": "2026-06-19T14:30:00+00:00",
+      "config": {
+        "frequencia": 60.0,
+        "horario_inicio": "08:00",
+        "horario_fim": "22:00",
+        "agent_id": "agent_1e4cfa23e3910c557d82167949",
+        "prompt_id": "24",
+        "file_name": "leads_campanha.csv",
+        "total_leads_csv": 500
+      },
+      "leads_pendentes_fila": 125
+    }
+  ]
+}
+```
+
+---
+
 ## Exemplos de Integração em Lote (CSV)
 
 ### 1. Upload de CSV via cURL
@@ -297,6 +365,8 @@ Permite suspender de imediato disparos agendados no Redis que ainda não foram e
 curl -X POST https://call-github.bkpxmb.easypanel.host/webhook/csv \
   -H "X-API-Key: sua-chave-api-aqui" \
   -F "file=@/caminho/do/meu/arquivo.csv" \
+  -F "horario_inicio=08:00" \
+  -F "horario_fim=18:00" \
   -F "frequencia=60" \
   -F "agent_id=agent_1e4cfa23e3910c557d82167949" \
   -F "prompt_id=24" \
@@ -310,7 +380,24 @@ curl -X POST https://call-github.bkpxmb.easypanel.host/webhook/csv/cancel \
   -F "batch_id=8939723b-2a96-462d-a048-33b0e60b0478"
 ```
 
-### 3. Ingestão de CSV em Python (httpx)
+### 3. Alteração Dinâmica de Frequência via cURL
+```bash
+curl -X POST https://call-github.bkpxmb.easypanel.host/webhook/csv/update-frequency \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sua-chave-api-aqui" \
+  -d '{
+    "batch_id": "8939723b-2a96-462d-a048-33b0e60b0478",
+    "frequencia": 15.0
+  }'
+```
+
+### 4. Consulta de Lotes Ativos via cURL
+```bash
+curl -X GET https://call-github.bkpxmb.easypanel.host/webhook/csv/active \
+  -H "X-API-Key: sua-chave-api-aqui"
+```
+
+### 5. Ingestão de CSV em Python (httpx)
 ```python
 import httpx
 
@@ -319,6 +406,8 @@ headers = {"X-API-Key": "sua-chave-api-aqui"}
 
 files = {"file": ("leads.csv", open("leads.csv", "rb"), "text/csv")}
 data = {
+    "horario_inicio": "08:30",
+    "horario_fim": "17:30",
     "frequencia": 30.0,
     "agent_id": "agent_1e4cfa23e3910c557d82167949",
     "prompt_id": "24",

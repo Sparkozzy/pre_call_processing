@@ -13,7 +13,14 @@ from arq.connections import RedisSettings
 from dotenv import load_dotenv
 
 from database import get_supabase_async
-from services import get_utc_now
+from services import get_utc_now, update_batch_frequency
+
+import re
+
+def validate_time_format(time_str: str) -> bool:
+    """Valida se uma string está no formato HH:MM (24h)."""
+    pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
+    return bool(re.match(pattern, time_str))
 
 load_dotenv()
 
@@ -153,6 +160,8 @@ async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: 
 async def receive_csv_webhook(
     request: Request,
     file: UploadFile = File(...),
+    horario_inicio: str = Form(...),
+    horario_fim: str = Form(...),
     contexto: Optional[str] = Form(None),
     frequencia: float = Form(...),
     agent_id: str = Form(...),
@@ -180,6 +189,25 @@ async def receive_csv_webhook(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A frequência não pode ser nula e nem menor que 1 segundo."
+        )
+        
+    if not validate_time_format(horario_inicio):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="O campo 'horario_inicio' deve estar no formato HH:MM (ex: 08:00)."
+        )
+    if not validate_time_format(horario_fim):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="O campo 'horario_fim' deve estar no formato HH:MM (ex: 22:00)."
+        )
+        
+    h_ini_hour, h_ini_min = map(int, horario_inicio.split(":"))
+    h_fim_hour, h_fim_min = map(int, horario_fim.split(":"))
+    if (h_ini_hour * 60 + h_ini_min) >= (h_fim_hour * 60 + h_fim_min):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="O horário de início deve ser menor que o horário de fim."
         )
         
     # 2. Leitura e validação síncrona do CSV em fluxo
@@ -267,6 +295,8 @@ async def receive_csv_webhook(
         'input_data': {
             'contexto': contexto,
             'frequencia': frequencia,
+            'horario_inicio': horario_inicio,
+            'horario_fim': horario_fim,
             'agent_id': agent_id,
             'prompt_id': prompt_id,
             'file_name': file.filename,
@@ -293,7 +323,9 @@ async def receive_csv_webhook(
         contexto, 
         frequencia, 
         agent_id, 
-        prompt_id
+        prompt_id,
+        horario_inicio,
+        horario_fim
     )
 
     return {
@@ -382,6 +414,133 @@ async def cancel_csv_webhook(
             "message": f"Panic Button ativado! Todos os disparos agendados de lotes estão suspensos.",
             "cancelled_batches_count": cancelled_count
         }
+
+class UpdateFrequencyPayload(BaseModel):
+    batch_id: str
+    frequencia: float
+
+@app.post("/webhook/csv/update-frequency", status_code=status.HTTP_200_OK)
+async def update_frequency(
+    request: Request,
+    payload: UpdateFrequencyPayload,
+    x_api_key: str = Header(alias="X-API-Key")
+):
+    """
+    Endpoint para alteração dinâmica da frequência de disparos de um lote ativo:
+    1. Autentica via X-API-Key.
+    2. Valida o novo valor de frequência.
+    3. Reordena e altera os scores (timestamps de agendamento) de todos os jobs pendentes no Redis.
+    """
+    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key inválida ou ausente."
+        )
+
+    if payload.frequencia < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A frequência não pode ser menor que 1 segundo."
+        )
+
+    try:
+        await update_batch_frequency(request.app.state.redis, payload.batch_id, payload.frequencia)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(ve)
+        )
+    except Exception as e:
+        logger.error(f"Erro ao atualizar frequência do lote {payload.batch_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro interno ao atualizar a frequência: {e}"
+        )
+
+    return {
+        "status": "success",
+        "message": f"Frequência do lote {payload.batch_id} atualizada para {payload.frequencia}s com sucesso."
+    }
+
+@app.get("/webhook/csv/active", status_code=status.HTTP_200_OK)
+async def list_active_batches(
+    request: Request,
+    x_api_key: str = Header(alias="X-API-Key")
+):
+    """
+    Lista todos os lotes (batches) de CSV ativos (com status RUNNING ou PENDING)
+    e retorna suas configurações e número de leads ainda pendentes na fila do Redis.
+    """
+    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key inválida ou ausente."
+        )
+
+    supabase_async = await get_supabase_async()
+    
+    # 1. Busca os lotes ativos no Supabase
+    try:
+        response = await supabase_async.table('workflow_executions')\
+            .select('id, status, input_data, started_at')\
+            .eq('workflow_name', 'csv_scheduling')\
+            .in_('status', ['RUNNING', 'PENDING'])\
+            .order('started_at', desc=True)\
+            .execute()
+        active_batches = response.data or []
+    except Exception as e:
+        logger.error(f"Erro ao buscar lotes ativos no Supabase: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao consultar banco de dados."
+        )
+
+    # 2. Varre o Redis para contar os jobs pendentes de cada lote
+    redis_client = request.app.state.redis
+    queue_name = 'arq:queue'
+    queue_exists = await redis_client.exists(queue_name)
+    
+    batch_counts = {}
+    if queue_exists:
+        raw_jobs = await redis_client.zrange(queue_name, 0, -1)
+        for job_bytes in raw_jobs:
+            job_id = job_bytes.decode('utf-8') if isinstance(job_bytes, bytes) else str(job_bytes)
+            if job_id.startswith("job:"):
+                parts = job_id.split(":")
+                if len(parts) >= 2:
+                    b_id = parts[1]
+                    batch_counts[b_id] = batch_counts.get(b_id, 0) + 1
+
+    # 3. Consolida as informações
+    result = []
+    for batch in active_batches:
+        batch_id = batch.get('id')
+        if not batch_id:
+            continue
+        input_data = batch.get('input_data') or {}
+        
+        config = {
+            "frequencia": input_data.get("frequencia"),
+            "horario_inicio": input_data.get("horario_inicio"),
+            "horario_fim": input_data.get("horario_fim"),
+            "agent_id": input_data.get("agent_id"),
+            "prompt_id": input_data.get("prompt_id"),
+            "file_name": input_data.get("file_name"),
+            "total_leads_csv": input_data.get("total_leads")
+        }
+        
+        result.append({
+            "batch_id": batch_id,
+            "status_supabase": batch.get('status'),
+            "started_at": batch.get('started_at'),
+            "config": config,
+            "leads_pendentes_fila": batch_counts.get(batch_id, 0)
+        })
+
+    return {
+        "status": "success",
+        "active_batches": result
+    }
 
 @app.get("/webhook/debug/redis")
 async def debug_redis(request: Request, x_api_key: str = Header(alias="X-API-Key")):

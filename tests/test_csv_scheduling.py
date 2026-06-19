@@ -20,6 +20,7 @@ async def mock_get_supabase_async():
     mock_table.select.return_value = mock_table
     mock_table.eq.return_value = mock_table
     mock_table.in_.return_value = mock_table
+    mock_table.order.return_value = mock_table
     mock_table.execute = mock_execute
     
     mock_client = MagicMock()
@@ -53,6 +54,8 @@ def setup_csv_mocks():
     mock_redis.enqueue_job = AsyncMock()
     mock_redis.get = AsyncMock(return_value=None)
     mock_redis.set = AsyncMock()
+    mock_redis.exists = AsyncMock(return_value=True)
+    mock_redis.zrange = AsyncMock(return_value=[])
     
     main.app.state.redis = mock_redis
     
@@ -77,7 +80,7 @@ def test_csv_webhook_auth_failure():
     response = client.post(
         "/webhook/csv",
         files={"file": file},
-        data={"frequencia": 60.0, "agent_id": "test_agent", "prompt_id": "22"},
+        data={"frequencia": 60.0, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "08:00", "horario_fim": "22:00"},
         headers={"X-API-Key": "INVALID_KEY"}
     )
     assert response.status_code == 401
@@ -91,7 +94,7 @@ def test_csv_webhook_invalid_params():
     response = client.post(
         "/webhook/csv",
         files={"file": file},
-        data={"frequencia": 0.5, "agent_id": "test_agent", "prompt_id": "22"},
+        data={"frequencia": 0.5, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "08:00", "horario_fim": "22:00"},
         headers={"X-API-Key": api_key}
     )
     assert response.status_code == 400
@@ -106,7 +109,7 @@ def test_csv_webhook_missing_header():
     response = client.post(
         "/webhook/csv",
         files={"file": file},
-        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22"},
+        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "08:00", "horario_fim": "22:00"},
         headers={"X-API-Key": api_key}
     )
     assert response.status_code == 400
@@ -121,7 +124,7 @@ def test_csv_webhook_missing_required_value():
     response = client.post(
         "/webhook/csv",
         files={"file": file},
-        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22"},
+        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "08:00", "horario_fim": "22:00"},
         headers={"X-API-Key": api_key}
     )
     assert response.status_code == 400
@@ -136,7 +139,7 @@ def test_csv_webhook_missing_plus_sign():
     response = client.post(
         "/webhook/csv",
         files={"file": file},
-        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22"},
+        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "08:00", "horario_fim": "22:00"},
         headers={"X-API-Key": api_key}
     )
     assert response.status_code == 400
@@ -155,7 +158,7 @@ def test_csv_webhook_success_with_email_fallback():
     response = client.post(
         "/webhook/csv",
         files={"file": file},
-        data={"frequencia": 60.0, "agent_id": "test_agent", "prompt_id": "22", "contexto": "Campanha Junho"},
+        data={"frequencia": 60.0, "agent_id": "test_agent", "prompt_id": "22", "contexto": "Campanha Junho", "horario_inicio": "08:00", "horario_fim": "22:00"},
         headers={"X-API-Key": api_key}
     )
     
@@ -211,7 +214,9 @@ async def test_csv_scheduling_business_hours(setup_csv_mocks):
             contexto_global="Teste",
             frequencia=1200.0, # 20 minutes
             agent_id="test_agent",
-            prompt_id="22"
+            prompt_id="22",
+            horario_inicio="08:00",
+            horario_fim="22:00"
         )
                 
     # Verify calls enqueued
@@ -265,6 +270,55 @@ async def test_schedule_execution_node_creates_master(setup_csv_mocks):
     
     mock_supabase.table.assert_any_call('workflow_executions')
     mock_table.insert.assert_called()
+
+def test_csv_webhook_invalid_times():
+    """Valida se horários limites inválidos ou invertidos são rejeitados."""
+    csv_data = "numero,nome,email\n+5548991027108,Ryan,ryan@test.com"
+    file = ("test.csv", io.BytesIO(csv_data.encode("utf-8")), "text/csv")
+    
+    # Formato inválido
+    response = client.post(
+        "/webhook/csv",
+        files={"file": file},
+        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "invalid", "horario_fim": "22:00"},
+        headers={"X-API-Key": api_key}
+    )
+    assert response.status_code == 400
+    assert "horario_inicio" in response.json()["detail"]
+
+    # Horários invertidos
+    csv_file_2 = ("test.csv", io.BytesIO(csv_data.encode("utf-8")), "text/csv")
+    response2 = client.post(
+        "/webhook/csv",
+        files={"file": csv_file_2},
+        data={"frequencia": 10.0, "agent_id": "test_agent", "prompt_id": "22", "horario_inicio": "18:00", "horario_fim": "09:00"},
+        headers={"X-API-Key": api_key}
+    )
+    assert response2.status_code == 400
+    assert "início deve ser menor" in response2.json()["detail"]
+
+def test_csv_update_frequency():
+    """Valida se o endpoint de alteração de frequência funciona."""
+    batch_id = "00000000-0000-0000-0000-000000000000"
+    with patch("main.update_batch_frequency", AsyncMock()) as mock_update:
+        response = client.post(
+            "/webhook/csv/update-frequency",
+            json={"batch_id": batch_id, "frequencia": 15.0},
+            headers={"X-API-Key": api_key}
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "success"
+        mock_update.assert_called_once()
+
+def test_csv_active_batches():
+    """Valida se o endpoint que lista lotes ativos funciona."""
+    response = client.get(
+        "/webhook/csv/active",
+        headers={"X-API-Key": api_key}
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert "active_batches" in response.json()
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

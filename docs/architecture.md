@@ -139,6 +139,8 @@ flowchart TD
 | `parse_iso_to_br(iso_date)` | Converte ISO 8601 → datetime no fuso de Brasília |
 | `strip_markdown(text)` | Remove bold, italic, headers, bullets e blockquotes para TTS |
 | `run_step_with_retry(...)` | Executor genérico async de nós com exponential backoff + jitter e registro automático no Supabase |
+| `adjust_to_business_hours(dt, horario_inicio, horario_fim)` | Garante que o datetime esteja dentro da janela limite configurada para o lote |
+| `update_batch_frequency(redis_client, batch_id, new_frequencia)` | Atualiza a frequência de disparos e reagenda os jobs pendentes no Redis |
 
 ## 🚀 Deploy e Produção
 

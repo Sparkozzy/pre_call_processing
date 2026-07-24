@@ -380,11 +380,9 @@ async def cancel_csv_webhook(
             "batch_id": batch_id
         }
     else:
-        # Cancelamento Global (Panic Button)
-        # 1. Ativa flag rápida global no Redis
-        await request.app.state.redis.set("system:status", "cancelled")
-        
-        # 2. Busca todos os lotes ativos na workflow_executions
+        # Cancelamento de Todos os Lotes Ativos
+        # Cancela individualmente cada lote ativo no Supabase e expurga seus agendamentos no Redis,
+        # sem bloquear requisições individuais do formulário.
         cancelled_count = 0
         try:
             active_batches_response = await supabase_async.table('workflow_executions')\
@@ -393,25 +391,26 @@ async def cancel_csv_webhook(
                 .in_('status', ['RUNNING', 'PENDING'])\
                 .execute()
                 
-            batch_ids = [b['id'] for b in active_batches_response.data]
+            batch_ids = [b['id'] for b in active_batches_response.data] if active_batches_response.data else []
             if batch_ids:
-                # 3. Atualiza todos para FAILED no Supabase
+                # 1. Atualiza todos os lotes ativos para FAILED no Supabase
                 await supabase_async.table('workflow_executions').update({
                     'status': 'FAILED',
-                    'error_details': 'Cancelamento global (Panic Button) ativado pelo usuário.',
+                    'error_details': 'Lote de disparos cancelado pelo usuário.',
                     'completed_at': get_utc_now()
                 }).in_('id', batch_ids).execute()
                 
-                # 4. Enfileira a limpeza de jobs no Redis para cada lote
+                # 2. Marca flag e enfileira a limpeza de jobs no Redis para cada lote
                 for b_id in batch_ids:
+                    await request.app.state.redis.set(f"batch:{b_id}:status", "cancelled")
                     await request.app.state.redis.enqueue_job('clean_cancelled_jobs', b_id)
                 cancelled_count = len(batch_ids)
         except Exception as e:
-            logger.error(f"Erro ao realizar cancelamento global no Supabase: {e}")
+            logger.error(f"Erro ao realizar cancelamento de lotes no Supabase: {e}")
 
         return {
             "status": "success",
-            "message": f"Panic Button ativado! Todos os disparos agendados de lotes estão suspensos.",
+            "message": f"Todos os disparos de lotes ativos foram suspensos ({cancelled_count} lotes). As chamadas individuais via formulário continuam operando normalmente.",
             "cancelled_batches_count": cancelled_count
         }
 

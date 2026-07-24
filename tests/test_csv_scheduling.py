@@ -191,7 +191,7 @@ def test_csv_cancel_global():
     )
     assert response.status_code == 200
     assert response.json()["status"] == "success"
-    assert "Panic Button ativado" in response.json()["message"]
+    assert "Todos os disparos de lotes ativos foram suspensos" in response.json()["message"]
 
 @pytest.mark.asyncio
 async def test_csv_scheduling_business_hours(setup_csv_mocks):

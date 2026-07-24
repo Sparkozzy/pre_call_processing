@@ -279,13 +279,13 @@ Permite suspender de imediato disparos agendados no Redis que ainda não foram e
 
 | Campo | Tipo | Obrigatório | Descrição |
 | :--- | :---: | :---: | :--- |
-| `batch_id` | `string` | ❌ | UUID do lote gerado pelo endpoint `/webhook/csv`. Se omitido, aciona o **Panic Button** e cancela **TODOS** os lotes ativos no sistema. |
+| `batch_id` | `string` | ❌ | UUID do lote gerado pelo endpoint `/webhook/csv`. Se informado, cancela e expurga os agendamentos no Redis desse lote específico. Se omitido, cancela e expurga os agendamentos no Redis de **TODOS os lotes de CSV ativos**, mantendo as requisições individuais do formulário (`/webhook`) operando normalmente. |
 
 #### Resposta de Sucesso (`200 OK`)
 ```json
 {
   "status": "success",
-  "message": "Interrupção do lote 8939723b-2a96-462d-a048-33b0e60b0478 ativada. Novos disparos foram bloqueados com sucesso.",
+  "message": "Interrupção do lote 8939723b-2a96-462d-a048-33b0e60b0478 ativada. Novos disparos foram bloqueados e expurgados do Redis com sucesso.",
   "batch_id": "8939723b-2a96-462d-a048-33b0e60b0478"
 }
 ```

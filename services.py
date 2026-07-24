@@ -614,31 +614,53 @@ async def ingest_csv_batch(ctx, batch_id: str, csv_content: str, contexto_global
 
 async def clean_cancelled_jobs(ctx, batch_id: str):
     """
-    Garbage Collector: Varre suavemente o Redis usando SCAN de forma assíncrona
-    para encontrar e deletar os jobs agendados que pertencem ao lote cancelado.
-    Evita spikes na CPU única do Redis rodando deleções graduais.
+    Garbage Collector:
+    1. Grava a flag de cancelamento do lote no Redis.
+    2. Varre o ZSET arq:queue e remove fisicamente todos os agendamentos pertencentes a este lote.
+    3. Deleta as chaves de metadados dos jobs em blocos (SCAN).
     """
     print(f"🧹 Iniciando limpeza física de jobs do lote cancelado {batch_id} no Redis...")
     redis_client = ctx['redis']
-    pattern = f"arq:job:job:{batch_id}:*"
     
+    # 1. Marca flag de bloqueio para o lote
+    try:
+        await redis_client.set(f"batch:{batch_id}:status", "cancelled")
+    except Exception as e:
+        print(f"⚠️ Erro ao gravar flag de cancelamento para lote {batch_id}: {e}")
+
+    # 2. Expurga do ZSET arq:queue
+    try:
+        raw_jobs = await redis_client.zrange('arq:queue', 0, -1)
+        to_remove = []
+        for j in raw_jobs:
+            j_str = j.decode('utf-8') if isinstance(j, bytes) else str(j)
+            if j_str.startswith(f"job:{batch_id}:"):
+                to_remove.append(j)
+                
+        if to_remove:
+            chunk_size = 500
+            for i in range(0, len(to_remove), chunk_size):
+                chunk = to_remove[i:i + chunk_size]
+                await redis_client.zrem('arq:queue', *chunk)
+                await asyncio.sleep(0.01)
+            print(f"🧹 Removidas {len(to_remove)} entradas da fila arq:queue para o lote {batch_id}.")
+    except Exception as e:
+        print(f"⚠️ Erro ao remover jobs do ZSET arq:queue: {e}")
+        
+    # 3. Limpeza das chaves de metadados arq:job:job:{batch_id}:*
+    pattern = f"arq:job:job:{batch_id}:*"
     count = 0
     cursor = 0
     try:
         while True:
-            # Varredura não bloqueante (SCAN) com contagem de 200 chaves por bloco
             cursor_res = await redis_client.scan(cursor=cursor, match=pattern, count=200)
             cursor = int(cursor_res[0])
             keys = cursor_res[1]
             
             if keys:
-                # Converte bytes em strings se necessário
                 keys_str = [k.decode('utf-8') if isinstance(k, bytes) else k for k in keys]
-                # Deleta em bloco no Redis
                 await redis_client.delete(*keys_str)
                 count += len(keys_str)
-                
-                # Pequeno delay de 10ms para dispersar carga no Redis
                 await asyncio.sleep(0.01)
                 
             if cursor == 0:

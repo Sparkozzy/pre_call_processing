@@ -345,13 +345,15 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
             retell_payload = {
                 "from_number": p.get("from_number") or os.getenv("RETELL_FROM_NUMBER", "iatizeia"),
                 "to_number": p.get("numero"),
-                "override_agent_id": p.get("agent_id"),
                 "metadata": {
                     "workflow_execution_id": execution_id,
                     "workflow_name": workflow_name
                 },
                 "retell_llm_dynamic_variables": dynamic_vars
             }
+            
+            if p.get("agent_id"):
+                retell_payload["override_agent_id"] = p.get("agent_id")
             
             max_retries = 5
             attempt = 0

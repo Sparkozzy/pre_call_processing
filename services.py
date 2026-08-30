@@ -32,11 +32,20 @@ def parse_iso_to_br(iso_date: str) -> datetime:
 def adjust_to_business_hours(dt: datetime, horario_inicio: str, horario_fim: str) -> datetime:
     """
     Garante que a data/hora dt (que deve estar no timezone de Brasília) esteja
-    dentro do intervalo de horário de funcionamento configurado.
-    Se estiver fora, move para o próximo horário disponível.
+    dentro do intervalo de horário de funcionamento configurado e em dias úteis (Segunda a Sexta).
+    Se estiver fora, move para o próximo horário/dia útil disponível.
     """
     h_ini_hour, h_ini_min = map(int, horario_inicio.split(":"))
     h_fim_hour, h_fim_min = map(int, horario_fim.split(":"))
+    
+    # 1. Se cair em final de semana, move imediatamente para a próxima Segunda-feira
+    # weekday(): 0 = Segunda ... 4 = Sexta, 5 = Sábado, 6 = Domingo
+    if dt.weekday() == 5:  # Sábado -> soma 2 dias para ir pra Segunda
+        dt = dt + timedelta(days=2)
+        return dt.replace(hour=h_ini_hour, minute=h_ini_min, second=0, microsecond=0)
+    elif dt.weekday() == 6:  # Domingo -> soma 1 dia para ir pra Segunda
+        dt = dt + timedelta(days=1)
+        return dt.replace(hour=h_ini_hour, minute=h_ini_min, second=0, microsecond=0)
     
     # Cria os datetimes de limite para o dia atual de dt
     dt_start = dt.replace(hour=h_ini_hour, minute=h_ini_min, second=0, microsecond=0)
@@ -45,6 +54,12 @@ def adjust_to_business_hours(dt: datetime, horario_inicio: str, horario_fim: str
     if dt >= dt_end:
         # Se passou do limite do dia atual, joga para o início do dia seguinte
         next_day = dt + timedelta(days=1)
+        # Se o dia seguinte for Sábado ou Domingo, avança para Segunda-feira
+        if next_day.weekday() == 5:  # Sábado -> pula 2 dias (Segunda)
+            next_day = next_day + timedelta(days=2)
+        elif next_day.weekday() == 6:  # Domingo -> pula 1 dia (Segunda)
+            next_day = next_day + timedelta(days=1)
+            
         return next_day.replace(hour=h_ini_hour, minute=h_ini_min, second=0, microsecond=0)
     elif dt < dt_start:
         # Se está antes do limite do dia atual, joga para o início do dia atual

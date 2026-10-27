@@ -182,9 +182,19 @@ async def schedule_execution_node(ctx, execution_id: str, payload: dict):
         await continue_workflow_execution(ctx, execution_id, payload)
         return
 
-    # 1. Comparação de datas
+    # 1. Comparação de datas e Trava 2 de Horário Comercial (a partir das 08:00 até 20:00)
     data_agendada = parse_iso_to_br(quando_ligar_raw)
     agora = get_br_now()
+    
+    start_hour = 8
+    end_hour = 20
+    if data_agendada.hour < start_hour or data_agendada.hour >= end_hour or data_agendada.weekday() >= 5:
+        data_agendada = data_agendada.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        if data_agendada <= agora:
+            data_agendada += timedelta(days=1)
+        while data_agendada.weekday() >= 5:
+            data_agendada += timedelta(days=1)
+        print(f"🛑 [TRAVA 2] Data ajustada para horário comercial: {data_agendada.isoformat()} BRT")
     
     step_input = {"quando_ligar_original": quando_ligar_raw, "agora_br": agora.isoformat()}
     
@@ -248,6 +258,36 @@ async def continue_workflow_execution(ctx, execution_id: str, payload: dict):
             }).eq('id', execution_id).execute()
         except Exception as se:
             print(f"⚠️ Erro ao atualizar cancelamento do lead no Supabase: {se}")
+        return
+
+    # Trava 2: Guardião Absoluto no Disparador (permitido apenas das 08h às 20h em dias úteis)
+    now_brt = get_br_now()
+    start_hour = 8
+    end_hour = 20
+
+    if now_brt.hour < start_hour or now_brt.hour >= end_hour or now_brt.weekday() >= 5:
+        target_brt = now_brt.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        if target_brt <= now_brt:
+            target_brt += timedelta(days=1)
+        while target_brt.weekday() >= 5:
+            target_brt += timedelta(days=1)
+
+        print(f"🛑 [TRAVA 2 - GUARDIÃO] Bloqueio de discagem fora de horário comercial ({now_brt.isoformat()}). Reagendando {payload.get('numero')} para {target_brt.isoformat()} BRT.")
+
+        try:
+            await supabase_async.table('workflow_executions').update({
+                'status': 'PENDING',
+                'input_data': {**payload, 'quando_ligar': target_brt.isoformat()}
+            }).eq('id', execution_id).execute()
+        except Exception as se:
+            print(f"⚠️ Erro ao atualizar Supabase no bloqueio guardião: {se}")
+
+        await ctx['redis'].enqueue_job(
+            'continue_workflow_execution',
+            execution_id,
+            {**payload, 'quando_ligar': target_brt.isoformat()},
+            _defer_until=target_brt
+        )
         return
 
     try:

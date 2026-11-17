@@ -45,20 +45,22 @@ Documentação de referência para desenvolvedores que consomem o workflow `pre_
 | | | Onde `DD` = DDD (código de área com 2 dígitos). |
 | `nome` | `string` | **Apenas o primeiro nome** do destinatário. Este valor será injetado no prompt dinâmico e utilizado diretamente na ligação via TTS (Text-to-Speech). |
 | `email` | `string` | E-mail válido do destinatário. Validado como `EmailStr` pelo Pydantic — endereços inválidos retornam `422`. |
-| `agent_id` | `string` | ID do agente configurado na plataforma Retell AI. Este campo faz override do agente padrão. Exemplo: `"agent_1e4cfa23e3910c557d82167949"`. |
-| `Prompt_id` | `string` | ID do prompt armazenado na tabela `Prompts` do Supabase. Pode ser numérico (ex: `"24"`) para busca por `id`, ou um nome textual (ex: `"onboarding_call"`) para busca por `Pormpt_Name`. Se o ID não for encontrado, o workflow falhará com erro descritivo. |
+| `agent_id` | `string` | ID do agente configurado na plataforma Retell AI. Se omitido, é resolvido automaticamente a partir de `client_configurations` (se autenticado com token de cliente ou se `client_id` for fornecido). |
+| `Prompt_id` | `string` | ID do prompt na tabela `Prompts` do Supabase. Se omitido, é resolvido automaticamente a partir de `client_configurations.prompt_id` (se autenticado com token de cliente ou se `client_id` for fornecido). |
 
 > [!IMPORTANT]
-> O campo `Prompt_id` é case-sensitive e utiliza `P` maiúsculo — exatamente `Prompt_id`, **não** `prompt_id`.
+> O campo `Prompt_id` é case-sensitive (`Prompt_id`). No entanto, caso a requisição seja autenticada com o token de cliente (`mindflow_api_token`) ou contenha `client_id`, `Prompt_id` e `agent_id` tornam-se opcionais, sendo herdados automaticamente das configurações do cliente cadastradas no Supabase Master.
 
 ### Campos Opcionais
 
 | Campo | Tipo | Default | Descrição |
 | :--- | :---: | :---: | :--- |
+| `client_id` | `string` | `null` | ID do cliente cadastrado no Supabase Master (`client_configurations`). Usado para resolução automática de `prompt_id` e `agent_id` quando chamado com chave mestre. |
 | `quando_ligar` | `string` | `null` | Data/hora para agendar a ligação. Veja seção [Agendamento](#agendamento-quando_ligar) abaixo. Se omitido ou `null`, a ligação é disparada **imediatamente**. |
 | `empresa` | `string` | `null` | Nome da empresa do destinatário. Injetado como variável de contexto no prompt dinâmico. |
 | `segmento` | `string` | `null` | Segmento de atuação da empresa. Injetado como variável de contexto no prompt dinâmico. |
-| `from_number` | `string` | `iatizeia` | Número remetente da ligação (ex: número específico para WhatsApp). Se omitido, utiliza o padrão configurado. |
+| `contexto` | `string` | `null` | Contexto adicional da captura (respostas de formulário / qualificação). |
+| `from_number` | `string` | `iatizeia` | Número remetente da ligação. Se omitido, utiliza o padrão configurado. |
 
 ---
 

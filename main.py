@@ -1,10 +1,11 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status, Request, Header, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, status, Request, Header, UploadFile, File, Form, Depends
 from pydantic import BaseModel, EmailStr, field_validator
-from typing import Optional
+from typing import Optional, Union
 import logging
 import os
 import hmac
+import time
 import csv
 import io
 import uuid
@@ -36,6 +37,69 @@ if "@" in REDIS_URL:
     
 WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY")
 
+CLIENT_AUTH_CACHE_TTL = int(os.getenv("CLIENT_AUTH_CACHE_TTL", "600"))
+_CLIENT_TOKENS_CACHE: dict[str, tuple[dict, float]] = {}
+
+async def verify_api_key(x_api_key: str = Header(alias="X-API-Key")) -> dict:
+    """
+    Valida o header X-API-Key contra:
+    1. A chave mestre interna (WEBHOOK_API_KEY) para retrocompatibilidade.
+    2. O campo mindflow_api_token da tabela client_configurations no Supabase Master.
+    Utiliza cache em memória com TTL configurável (padrão 600s / 10 minutos).
+    """
+    if not x_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Header 'X-API-Key' ausente."
+        )
+
+    # 1. Validação da Chave Mestre
+    if WEBHOOK_API_KEY and hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
+        return {
+            "is_master": True,
+            "client_id": "master",
+            "client_name": "MindFlow Internal",
+            "prompt_id": None,
+            "agent_id_ligacao_whatsapp": None
+        }
+
+    # 2. Verificação no Cache em Memória
+    now = time.time()
+    if x_api_key in _CLIENT_TOKENS_CACHE:
+        client_data, expire_at = _CLIENT_TOKENS_CACHE[x_api_key]
+        if now < expire_at:
+            return client_data
+
+    # 3. Consulta Assíncrona no Supabase Master (client_configurations)
+    try:
+        supabase_async = await get_supabase_async()
+        res = await supabase_async.table("client_configurations")\
+            .select("client_id, client_name, mindflow_api_token, prompt_id, agent_id_ligacao_whatsapp")\
+            .eq("mindflow_api_token", x_api_key)\
+            .execute()
+
+        if res.data and len(res.data) > 0:
+            row = res.data[0]
+            token_in_db = row.get("mindflow_api_token")
+            if token_in_db and hmac.compare_digest(str(token_in_db), x_api_key):
+                client_data = {
+                    "is_master": False,
+                    "client_id": str(row.get("client_id")),
+                    "client_name": row.get("client_name"),
+                    "prompt_id": row.get("prompt_id"),
+                    "agent_id_ligacao_whatsapp": row.get("agent_id_ligacao_whatsapp")
+                }
+                _CLIENT_TOKENS_CACHE[x_api_key] = (client_data, now + CLIENT_AUTH_CACHE_TTL)
+                return client_data
+    except Exception as e:
+        logger.error(f"Erro ao validar token no Supabase Master: {e}")
+
+    # Não autenticado
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="API Key inválida ou revogada. Verifique o header 'X-API-Key'."
+    )
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gerencia a conexão com o banco de dados Redis durando o ciclo de vida da API."""
@@ -58,6 +122,7 @@ class WebhookPayload(BaseModel):
     numero: str
     nome: str
     email: str
+    client_id: Optional[Union[str, int]] = None
     agent_id: Optional[str] = None
     Prompt_id: Optional[str] = None
     quando_ligar: Optional[str] = None # ISO 8601 string
@@ -65,6 +130,13 @@ class WebhookPayload(BaseModel):
     segmento: Optional[str] = None
     contexto: Optional[str] = None
     from_number: Optional[str] = None
+
+    @field_validator('client_id', mode='before')
+    @classmethod
+    def clean_client_id(cls, v):
+        if v is not None:
+            return str(v).strip()
+        return None
 
     @field_validator('email', mode='before')
     @classmethod
@@ -91,20 +163,54 @@ class WebhookPayload(BaseModel):
         return v
 
 @app.post("/webhook", status_code=status.HTTP_202_ACCEPTED)
-async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: str = Header(alias="X-API-Key")):
+async def receive_webhook(
+    request: Request,
+    payload: WebhookPayload,
+    auth_info: dict = Depends(verify_api_key)
+):
     """
     Endpoint de recepção:
-    1. Autentica via X-API-Key header.
-    2. Valida regras de negócio (Pydantic).
-    3. Cria registro Master no Supabase.
-    4. Delega o payload inteiro para a fila do Redis via ARQ. O worker vai processar os passos do nó assincronamente.
+    1. Autentica via X-API-Key header (chave mestre ou token multi-tenant do cliente).
+    2. Resolução dinâmica de parâmetros (Prompt_id e agent_id baseados no client_configurations se omitidos).
+    3. Valida regras de negócio (Pydantic / E.164).
+    4. Cria registro Master no Supabase.
+    5. Delega o payload inteiro para a fila do Redis via ARQ. O worker vai processar os passos do nó assincronamente.
     """
-    
-    # 0. Autenticação via API Key
-    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
+    # 0. Resolução inteligente de client_id, Prompt_id e agent_id
+    effective_client_id = payload.client_id or (auth_info.get("client_id") if not auth_info.get("is_master") else None)
+
+    # Se Prompt_id ou agent_id estiverem ausentes e temos um client_id
+    if (not payload.Prompt_id or not payload.agent_id) and effective_client_id:
+        client_prompt = auth_info.get("prompt_id")
+        client_agent = auth_info.get("agent_id_ligacao_whatsapp")
+
+        # Se veio via chave master mas informou client_id no payload, busca na tabela do Supabase
+        if (not client_prompt or not client_agent) and auth_info.get("is_master"):
+            try:
+                supabase_async = await get_supabase_async()
+                c_res = await supabase_async.table("client_configurations")\
+                    .select("client_id, client_name, prompt_id, agent_id_ligacao_whatsapp")\
+                    .eq("client_id", str(effective_client_id))\
+                    .execute()
+                if c_res.data and len(c_res.data) > 0:
+                    c_row = c_res.data[0]
+                    client_prompt = c_row.get("prompt_id")
+                    client_agent = c_row.get("agent_id_ligacao_whatsapp")
+                    if not auth_info.get("client_name"):
+                        auth_info["client_name"] = c_row.get("client_name")
+            except Exception as e:
+                logger.warning(f"Erro ao buscar client_configurations para client_id {effective_client_id}: {e}")
+
+        if not payload.Prompt_id and client_prompt:
+            payload.Prompt_id = str(client_prompt)
+        if not payload.agent_id and client_agent:
+            payload.agent_id = str(client_agent)
+
+    # Validação obrigatória de Prompt_id
+    if not payload.Prompt_id:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API Key inválida ou ausente. Verifique o header 'X-API-Key'."
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Prompt_id ausente. Envie 'Prompt_id' no payload ou configure 'prompt_id' para este cliente em client_configurations."
         )
     
     if not payload.numero.startswith("+"):
@@ -127,11 +233,17 @@ async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: 
             )
 
     # 2. Criação do Registro Mestre (Rastreabilidade EDW) usando Client Assíncrono do SDK Supabase
+    payload_dict = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
+    if effective_client_id and effective_client_id != "master":
+        payload_dict["client_id"] = str(effective_client_id)
+        if auth_info.get("client_name"):
+            payload_dict["client_name"] = auth_info["client_name"]
+
     master_data = {
         'workflow_name': payload.workflow_name,
         'trigger_event_id': payload.execution_id,
         'status': 'PENDING',
-        'input_data': payload.dict(),
+        'input_data': payload_dict,
         'started_at': get_utc_now()
     }
 
@@ -147,9 +259,9 @@ async def receive_webhook(request: Request, payload: WebhookPayload, x_api_key: 
         )
 
     # 3. Delega para a fila do worker (arq) e libera imediatamente o processo
-    await request.app.state.redis.enqueue_job('schedule_execution_node', db_execution_id, payload.dict())
+    await request.app.state.redis.enqueue_job('schedule_execution_node', db_execution_id, payload_dict)
 
-    # 4. Sucesso de Receção (202 - Accepted)
+    # 4. Sucesso de Recepção (202 - Accepted)
     return {
         "status": "success",
         "message": "Webhook aceito, registro mestre criado e delegado para a fila persistente.",
@@ -166,23 +278,16 @@ async def receive_csv_webhook(
     frequencia: float = Form(...),
     agent_id: str = Form(...),
     prompt_id: str = Form(...),
-    x_api_key: str = Header(alias="X-API-Key")
+    auth_info: dict = Depends(verify_api_key)
 ):
     """
     Endpoint para recepção e agendamento de chamadas a partir de arquivos CSV:
-    1. Autentica via X-API-Key.
+    1. Autentica via X-API-Key (Depends verify_api_key).
     2. Valida parâmetros globais e estrutura do CSV em streaming.
     3. Cria registro de lote sob workflow 'csv_scheduling' em workflow_executions.
     4. Salva temporariamente o arquivo CSV localmente.
     5. Enfileira a ingestão em background no worker (ingest_csv_batch) e retorna 200 OK.
     """
-    
-    # 0. Autenticação via API Key
-    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API Key inválida ou ausente. Verifique o header 'X-API-Key'."
-        )
         
     # 1. Validação dos Parâmetros Globais
     if frequencia < 1:
@@ -339,20 +444,13 @@ async def receive_csv_webhook(
 async def cancel_csv_webhook(
     request: Request,
     batch_id: Optional[str] = Form(None),
-    x_api_key: str = Header(alias="X-API-Key")
+    auth_info: dict = Depends(verify_api_key)
 ):
     """
     Endpoint para cancelamento emergencial (Kill Switch):
     1. Se 'batch_id' for informado, cancela apenas esse lote.
     2. Se não for informado, cancela TODOS os lotes ativos globais (Panic Button).
     """
-    
-    # 0. Autenticação via API Key
-    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API Key inválida ou ausente."
-        )
 
     supabase_async = await get_supabase_async()
 
@@ -422,7 +520,7 @@ class UpdateFrequencyPayload(BaseModel):
 async def update_frequency(
     request: Request,
     payload: UpdateFrequencyPayload,
-    x_api_key: str = Header(alias="X-API-Key")
+    auth_info: dict = Depends(verify_api_key)
 ):
     """
     Endpoint para alteração dinâmica da frequência de disparos de um lote ativo:
@@ -430,12 +528,6 @@ async def update_frequency(
     2. Valida o novo valor de frequência.
     3. Reordena e altera os scores (timestamps de agendamento) de todos os jobs pendentes no Redis.
     """
-    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API Key inválida ou ausente."
-        )
-
     if payload.frequencia < 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -464,18 +556,12 @@ async def update_frequency(
 @app.get("/webhook/csv/active", status_code=status.HTTP_200_OK)
 async def list_active_batches(
     request: Request,
-    x_api_key: str = Header(alias="X-API-Key")
+    auth_info: dict = Depends(verify_api_key)
 ):
     """
     Lista todos os lotes (batches) de CSV ativos (com status RUNNING ou PENDING)
     e retorna suas configurações e número de leads ainda pendentes na fila do Redis.
     """
-    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API Key inválida ou ausente."
-        )
-
     supabase_async = await get_supabase_async()
     
     # 1. Busca os lotes ativos no Supabase
@@ -542,15 +628,13 @@ async def list_active_batches(
     }
 
 @app.get("/webhook/debug/redis")
-async def debug_redis(request: Request, x_api_key: str = Header(alias="X-API-Key")):
+async def debug_redis(
+    request: Request,
+    auth_info: dict = Depends(verify_api_key)
+):
     """
     Diagnostic endpoint to view keys and enqueued jobs in Redis.
     """
-    if not WEBHOOK_API_KEY or not hmac.compare_digest(x_api_key, WEBHOOK_API_KEY):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API Key inválida ou ausente."
-        )
     
     from datetime import datetime, timezone
     import zoneinfo
